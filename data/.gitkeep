@@ -1,0 +1,3 @@
+# Haelt data/ im Repo, damit "git add data" im Workflow auch beim allerersten
+# Lauf nicht ins Leere greift. Hier landen stations.json, latest.json und
+# prices/YYYY-MM.csv.

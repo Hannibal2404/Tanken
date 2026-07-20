@@ -1,0 +1,102 @@
+name: Spritpreise
+
+on:
+  schedule:
+    # Alle 20 Minuten. Tankerkoenig erlaubt einen Abruf alle 5 Minuten --
+    # damit bleiben wir mit Faktor 4 sicher darunter.
+    #
+    # Krumme Minuten sind Absicht: GitHub-Cron ist "best effort", zur vollen
+    # Stunde ist die Last am hoechsten und Laeufe werden verzoegert oder ganz
+    # verworfen. Rechne trotzdem mit gelegentlichen Luecken -- fuer die
+    # Tageskurve in Schritt 2 ist das unkritisch.
+    #
+    # Die Zeitzonenfrage ist hier bewusst entschaerft: der Job laeuft rund um
+    # die Uhr gleichmaessig, deshalb verschiebt die Sommerzeit nichts. In der
+    # CSV steht ohnehin UTC, angezeigt wird Europe/Berlin.
+    - cron: "7,27,47 * * * *"
+
+  # Manuell ausloesbar (Actions-Tab -> Run workflow).
+  workflow_dispatch:
+    inputs:
+      refresh_stations:
+        description: "Umkreissuche neu durchfuehren (nach Radius-Aenderung)"
+        type: boolean
+        default: false
+
+# BEWUSST KEIN push-Trigger: der Job committet selbst ins Repo und wuerde sich
+# sonst endlos neu starten. Zweite Sicherung ist "[skip ci]" in der Message.
+
+permissions:
+  contents: write   # Historie ins Repo zurueck-committen
+  pages: write      # GitHub-Pages-Deploy
+  id-token: write   # OIDC-Token fuer deploy-pages
+
+# Nie zwei Laeufe gleichzeitig -- sonst schreiben beide am selben Branch.
+concurrency:
+  group: spritpreise
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+        with:
+          # Volle Historie: nur damit funktioniert der rebase-Fallback im
+          # Push-Schritt zuverlaessig. Die Commits sind winzig (wenige Zeilen
+          # CSV), das faellt beim Klonen nicht ins Gewicht.
+          fetch-depth: 0
+        # checkout legt den GITHUB_TOKEN als Git-Credential ab -- damit
+        # funktioniert der Push weiter unten ohne PAT.
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Preise abrufen, Historie fortschreiben, Dashboard bauen
+        env:
+          TANKERKOENIG_API_KEY: ${{ secrets.TANKERKOENIG_API_KEY }}
+        run: |
+          python spritpreise.py --out ./public \
+            ${{ inputs.refresh_stations && '--refresh-stations' || '' }}
+
+      - name: Historie zurueck-committen
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --staged --quiet; then
+            echo "Keine Preisaenderung -- nichts zu committen."
+            exit 0
+          fi
+          git commit -m "Preisdaten $(date -u '+%Y-%m-%d %H:%M UTC') [skip ci]"
+          # Falls doch mal ein Lauf dazwischengekommen ist: sauber daraufsetzen.
+          for i in 1 2 3; do
+            if git push; then exit 0; fi
+            echo "Push abgelehnt -- rebase und erneut versuchen ($i/3)."
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+          done
+          echo "Push nach 3 Versuchen fehlgeschlagen." >&2
+          exit 1
+
+      - name: Pages-Artefakt hochladen
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Auf GitHub Pages veroeffentlichen
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,3 @@
+httpx
+Pillow
+tzdata; platform_system == "Windows"

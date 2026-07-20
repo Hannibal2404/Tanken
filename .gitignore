@@ -1,0 +1,19 @@
+# Erzeugte Ausgabe (wird im Workflow frisch gebaut)
+public/
+dist/
+out/
+
+# Secrets -- der API-Key gehoert in ein GitHub-Secret bzw. eine Umgebungs-
+# variable, niemals in eine Datei im Repo.
+.env
+*.key
+*.pem
+*apikey*
+*api_key*
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / Tooling
+.claude/
