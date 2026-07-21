@@ -4,7 +4,8 @@ Verfolgt die Dieselpreise der Tankstellen im Umkreis der Bleckenburgstraße
 (Magdeburg-Buckau), zeichnet jede Preisänderung auf und zeigt den aktuellen
 Stand als mobiles Dashboard.
 
-- **Motor:** GitHub Actions (`schedule` alle 20 Min + `workflow_dispatch`)
+- **Motor:** externer Trigger (cron-job.org) → `repository_dispatch` alle 20 Min;
+  GitHub-eigener `schedule` alle 2 h nur als Sicherheitsnetz
 - **Anzeige:** GitHub Pages, nativer Deploy via `actions/deploy-pages@v4`
 - **Datenquelle:** [Tankerkönig](https://creativecommons.tankerkoenig.de)
   (Markttransparenzstelle für Kraftstoffe), CC BY 4.0, nicht-kommerziell
@@ -129,6 +130,32 @@ Zweistufig, damit die CC-Schnittstelle nicht unnötig belastet wird:
 
 Tankerkönig erlaubt einen Abruf alle 5 Minuten. Der Workflow läuft alle 20
 Minuten — Faktor 4 Sicherheitsabstand.
+
+## Warum der Takt von außen kommt
+
+GitHubs eigener `schedule` ist „best effort": Läufe kommen Stunden zu spät oder
+fallen ganz aus. Beim Schwesterprojekt *Wetter* lief er an drei Tagen gar nicht,
+sonst bis zu 7 Stunden verspätet. Für einen Preistracker ist das gravierender
+als für eine Wettervorhersage — **Tankerkönig liefert keine Historie nach**, ein
+ausgefallener Lauf ist dauerhaft fehlende Datenlage.
+
+Deshalb feuert cron-job.org alle 20 Minuten ein `repository_dispatch`
+(Reaktionszeit ~40 s). Der GitHub-Cron bleibt mit 2-Stunden-Takt als Netz
+bestehen: fällt der externe Dienst aus oder läuft das Token ab, sammelt das
+Repo grob weiter, statt still zu verstummen. Doppelte Läufe kosten nichts, weil
+bei unveränderten Preisen keine Zeile geschrieben wird.
+
+### Einrichtung des Triggers
+
+`POST https://api.github.com/repos/Hannibal2404/Tanken/dispatches`
+mit Body `{"event_type":"spritpreise"}` und den Headern `Accept:
+application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28` sowie
+`Authorization: Bearer <Token>`. Erfolg ist **HTTP 204**.
+
+Das Token ist ein Fine-grained PAT, nur auf dieses Repo beschränkt, mit
+**Contents: Read and write** *und* **Actions: Read and write**. Fehlt die
+Actions-Berechtigung, antwortet die API mit 403. Ablaufdatum notieren — ein
+abgelaufenes Token sieht von außen aus wie „die Seite hängt".
 
 ## Stand
 
