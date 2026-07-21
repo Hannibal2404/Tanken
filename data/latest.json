@@ -1,125 +1,125 @@
 {
-  "checked_utc": "2026-07-21T23:00:55Z",
+  "checked_utc": "2026-07-21T23:30:43Z",
   "stations": {
     "23cb9e76-f277-4ab3-b64b-d5d8a71eee0a": {
       "status": "open",
       "diesel": 2.169,
       "since_utc": "2026-07-21T17:30:56Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "3bc75820-2e63-4a74-92cf-ef078b21accf": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T20:00:50Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "e1a15081-2513-9107-e040-0b0a3dfe563c": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T20:00:50Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "77d0b269-a3f2-4a90-aebb-264d45748583": {
       "status": "open",
       "diesel": 2.169,
       "since_utc": "2026-07-21T17:30:56Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "6cc0da1b-3d06-4abf-a2e9-3a4f67469658": {
       "status": "open",
       "diesel": 2.149,
       "since_utc": "2026-07-21T19:00:53Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "4910a275-9695-403e-bb77-bf059a03713b": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T20:00:50Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "0014c75b-2b35-4fad-b162-8b3fb9125cd2": {
       "status": "open",
       "diesel": 2.169,
       "since_utc": "2026-07-21T17:30:56Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "ff84eb62-9c83-4c6a-b3e3-d7dad141e8d5": {
       "status": "open",
       "diesel": 2.139,
       "since_utc": "2026-07-21T19:30:49Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "4c8cac28-e631-42aa-8206-db8f9acf8919": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T20:00:50Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "0644af18-e91e-4f5c-b23b-ecee706482ce": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T19:00:53Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "51d4b662-a095-1aa0-e100-80009459e03a": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T20:00:50Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "695e738d-6386-4189-b454-af4a2947e89d": {
       "status": "open",
       "diesel": 2.139,
       "since_utc": "2026-07-21T19:30:49Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "005056ba-7cb6-1ed2-bceb-8b9067120d33": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T21:00:56Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "3d5d33e1-982e-4bd9-831c-7710f4b2bd72": {
       "status": "open",
       "diesel": 2.129,
       "since_utc": "2026-07-21T19:00:53Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "f3f3b1ad-72ef-424a-8237-96c84ef806af": {
       "status": "open",
       "diesel": 2.139,
       "since_utc": "2026-07-21T19:00:53Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "515bab29-79a3-4a95-937b-3a13c7907955": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T20:00:50Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "005056a9-779e-1eee-bfc4-26f2ed85158d": {
       "status": "open",
       "diesel": 2.129,
       "since_utc": "2026-07-21T19:00:53Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "51d4b52a-a095-1aa0-e100-80009459e03a": {
       "status": "closed",
       "diesel": null,
       "since_utc": "2026-07-21T21:00:56Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "9cc82fee-ffbf-4cf3-948a-9c5e494588a8": {
       "status": "open",
       "diesel": 2.139,
       "since_utc": "2026-07-21T18:30:44Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     },
     "03344243-1c82-4fe4-9191-9d9bc9cc4d14": {
       "status": "open",
       "diesel": 2.139,
       "since_utc": "2026-07-21T19:30:49Z",
-      "checked_utc": "2026-07-21T23:00:55Z"
+      "checked_utc": "2026-07-21T23:30:43Z"
     }
   }
 }
