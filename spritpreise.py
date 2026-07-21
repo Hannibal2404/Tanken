@@ -553,8 +553,11 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
         s = by_id.get(sid)
         if s:
             rows.append((s, st))
+    # Preis zuerst, bei Gleichstand die naehere Tankstelle nach oben. In der
+    # Stadt liegen oft ein Dutzend Betreiber auf demselben Zehntelcent -- dann
+    # entscheidet nicht der Preis, sondern der Weg.
     open_rows = sorted([r for r in rows if r[1].get("diesel") is not None],
-                       key=lambda r: r[1]["diesel"])
+                       key=lambda r: (r[1]["diesel"], r[0].get("dist_km") or 99))
     other_rows = sorted([r for r in rows if r[1].get("diesel") is None],
                         key=lambda r: r[0].get("dist_km") or 99)
 
