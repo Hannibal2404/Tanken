@@ -79,7 +79,11 @@ CONFIG = {
 
     # --- Fuer Schritt 2 bereits vorgesehen ---------------------------------
     "tank_liter": 50.0,      # Tankgroesse fuer die Euro-Ersparnis
-    "alarm_schwelle": 1.60,  # Hinweis, wenn Diesel darunter faellt (EUR/l)
+    # Hinweis, wenn Diesel darunter faellt (EUR/l). Muss zum Marktniveau passen:
+    # am 21.07.2026 lag der guenstigste Preis in Buckau bei 2,308 -- eine
+    # Schwelle deutlich darunter loest nie aus. Faustregel: knapp unter das,
+    # was du an einem guten Tag siehst.
+    "alarm_schwelle": 2.25,
 }
 
 APP_NAME = "Diesel-Tracker"
@@ -553,6 +557,15 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
     checked = parse_iso_utc(state.get("checked_utc", "")) or now
     stand = checked.astimezone(tz).strftime("%d.%m.%Y, %H:%M Uhr")
 
+    # Was die Seite wirklich abdeckt. In der Stadt greift meist max_stations
+    # lange vor radius_km -- dann waere "Umkreis 10 km" schlicht gelogen.
+    dists = [s["dist_km"] for s in stations if s.get("dist_km") is not None]
+    if dists and max(dists) < cfg["radius_km"] * 0.95:
+        coverage = (f"Die {len(dists)} n&auml;chsten Tankstellen "
+                    f"(bis {fmt_km(max(dists))} km)")
+    else:
+        coverage = f"Umkreis {cfg['radius_km']:.0f} km"
+
     # --- Stoerungshinweis ---
     alert_html = ""
     if error:
@@ -637,7 +650,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
   <header class="masthead">
     <div class="kicker">&#9981; Diesel-Tracker</div>
     <h1 class="title">{html.escape(loc['name'])}</h1>
-    <p class="sub">Umkreis {cfg['radius_km']:.0f} km um die
+    <p class="sub">{coverage} um die
       {html.escape(loc['street'])} &middot; Stand {stand}</p>
   </header>
 
