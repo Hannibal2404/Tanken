@@ -1,19 +1,26 @@
 name: Spritpreise
 
 on:
+  # --- MOTOR: externer Trigger (cron-job.org) ---------------------------------
+  # Alle 20 Minuten per repository_dispatch. Grund: GitHubs eigener Scheduler
+  # ist "best effort" und laesst Laeufe stundenlang liegen oder verwirft sie
+  # ganz (beim Schwesterprojekt Wetter: an drei Tagen gar nicht, sonst bis zu
+  # 7 h zu spaet). Fuer einen Preistracker ist das fatal, weil Tankerkoenig
+  # keine Historie nachliefert -- ein ausgefallener Lauf ist dauerhaft
+  # verlorene Datenlage. Der externe Trigger feuert in ~40 Sekunden.
+  repository_dispatch:
+    types: [spritpreise]
+
+  # --- SICHERHEITSNETZ: GitHubs eigener Cron ---------------------------------
+  # Bewusst duenn (alle 2 h, krumme Minute). Faellt cron-job.org aus oder
+  # laeuft das Token ab, sammelt das Repo wenigstens grob weiter, statt still
+  # zu verstummen. Ueberfluessige Laeufe kosten nichts: die Delta-Logik
+  # schreibt bei unveraenderten Preisen keine Zeile.
+  #
+  # Zeitzone spielt keine Rolle -- der Job laeuft rund um die Uhr
+  # gleichmaessig. In der CSV steht UTC, angezeigt wird Europe/Berlin.
   schedule:
-    # Alle 20 Minuten. Tankerkoenig erlaubt einen Abruf alle 5 Minuten --
-    # damit bleiben wir mit Faktor 4 sicher darunter.
-    #
-    # Krumme Minuten sind Absicht: GitHub-Cron ist "best effort", zur vollen
-    # Stunde ist die Last am hoechsten und Laeufe werden verzoegert oder ganz
-    # verworfen. Rechne trotzdem mit gelegentlichen Luecken -- fuer die
-    # Tageskurve in Schritt 2 ist das unkritisch.
-    #
-    # Die Zeitzonenfrage ist hier bewusst entschaerft: der Job laeuft rund um
-    # die Uhr gleichmaessig, deshalb verschiebt die Sommerzeit nichts. In der
-    # CSV steht ohnehin UTC, angezeigt wird Europe/Berlin.
-    - cron: "7,27,47 * * * *"
+    - cron: "13 */2 * * *"
 
   # Manuell ausloesbar (Actions-Tab -> Run workflow).
   workflow_dispatch:
@@ -62,9 +69,15 @@ jobs:
       - name: Preise abrufen, Historie fortschreiben, Dashboard bauen
         env:
           TANKERKOENIG_API_KEY: ${{ secrets.TANKERKOENIG_API_KEY }}
+        # Die Umkreissuche laesst sich auf beiden Wegen erzwingen: per Haekchen
+        # im Actions-Dialog oder per {"client_payload":{"refresh_stations":true}}
+        # im Dispatch-Body. Beim Schedule sind beide null -> normaler Lauf.
+        # (Noetig ist das ohnehin selten: aendert sich max_stations/radius_km
+        # in der CONFIG, erkennt das Skript das von allein.)
         run: |
           python spritpreise.py --out ./public \
-            ${{ inputs.refresh_stations && '--refresh-stations' || '' }}
+            ${{ (inputs.refresh_stations || github.event.client_payload.refresh_stations)
+                && '--refresh-stations' || '' }}
 
       - name: Historie zurueck-committen
         run: |
