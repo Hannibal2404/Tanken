@@ -3,10 +3,10 @@
     "lat": 52.1114,
     "lon": 11.637,
     "radius_km": 10.0,
-    "max_stations": 12,
+    "max_stations": 20,
     "fuel": "diesel"
   },
-  "fetched_utc": "2026-07-21T11:21:00Z",
+  "fetched_utc": "2026-07-21T11:53:57Z",
   "stations": [
     {
       "id": "3bc75820-2e63-4a74-92cf-ef078b21accf",
@@ -151,6 +151,102 @@
       "lat": 52.13014,
       "lng": 11.6786,
       "dist_km": 3.5
+    },
+    {
+      "id": "695e738d-6386-4189-b454-af4a2947e89d",
+      "name": "Esso Tankstelle",
+      "brand": "ESSO",
+      "street": "LEIPZIGER CHAUSSEE 101",
+      "house_number": "",
+      "post_code": 39120,
+      "place": "MAGDEBURG",
+      "lat": 52.080188,
+      "lng": 11.620071,
+      "dist_km": 3.7
+    },
+    {
+      "id": "005056a9-779e-1eee-bfc4-26f2ed85158d",
+      "name": "ORLEN Tankstelle",
+      "brand": "ORLEN",
+      "street": "Berliner Chaussee",
+      "house_number": "117",
+      "post_code": 39114,
+      "place": "Magdeburg",
+      "lat": 52.131432,
+      "lng": 11.68336,
+      "dist_km": 3.9
+    },
+    {
+      "id": "9cc82fee-ffbf-4cf3-948a-9c5e494588a8",
+      "name": "MAGDEBURG - OLVENSTEDTER CHAUSSEE 2",
+      "brand": "AGIP ENI",
+      "street": "Olvenstedter Chaussee",
+      "house_number": "22",
+      "post_code": 39130,
+      "place": "Magdeburg",
+      "lat": 52.140034,
+      "lng": 11.600539,
+      "dist_km": 4
+    },
+    {
+      "id": "51d4b52a-a095-1aa0-e100-80009459e03a",
+      "name": "JET MAGDEBURG LUEBECKER STR. 3",
+      "brand": "JET",
+      "street": "LUEBECKER STR.",
+      "house_number": "3",
+      "post_code": 39124,
+      "place": "MAGDEBURG",
+      "lat": 52.14954,
+      "lng": 11.63865,
+      "dist_km": 4.2
+    },
+    {
+      "id": "515bab29-79a3-4a95-937b-3a13c7907955",
+      "name": "Shell Magdeburg Rogaetzer Str. 61",
+      "brand": "Shell",
+      "street": "Rogaetzer Str.",
+      "house_number": "61",
+      "post_code": 39106,
+      "place": "Magdeburg",
+      "lat": 52.148311,
+      "lng": 11.654586,
+      "dist_km": 4.3
+    },
+    {
+      "id": "51d4b662-a095-1aa0-e100-80009459e03a",
+      "name": "JET MAGDEBURG SALBKER CHAUSSEE 67-71",
+      "brand": "JET",
+      "street": "SALBKER CHAUSSEE",
+      "house_number": "67-71",
+      "post_code": 39118,
+      "place": "MAGDEBURG",
+      "lat": 52.08241,
+      "lng": 11.59506,
+      "dist_km": 4.3
+    },
+    {
+      "id": "03344243-1c82-4fe4-9191-9d9bc9cc4d14",
+      "name": "Shell Magdeburg Werner-von-Siemens-Ring 15",
+      "brand": "Shell",
+      "street": "Werner-von-Siemens-Ring",
+      "house_number": "15",
+      "post_code": 39116,
+      "place": "Magdeburg",
+      "lat": 52.080032,
+      "lng": 11.583544,
+      "dist_km": 5
+    },
+    {
+      "id": "005056ba-7cb6-1ed2-bceb-8b9067120d33",
+      "name": "star Tankstelle",
+      "brand": "STAR",
+      "street": "Alt Salbke",
+      "house_number": "60-63",
+      "post_code": 39122,
+      "place": "Magdeburg",
+      "lat": 52.070733,
+      "lng": 11.671302,
+      "dist_km": 5.1
     }
   ]
 }
