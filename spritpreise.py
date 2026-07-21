@@ -65,7 +65,11 @@ CONFIG = {
     # Umkreissuche. Die API deckelt den Radius bei 25 km.
     "radius_km": 10.0,
     # Nur die N naechstgelegenen Tankstellen verfolgen (haelt Abruf + Seite schlank).
-    "max_stations": 12,
+    # In der Stadt ist dies die bindende Grenze, nicht radius_km: bei 12 lagen
+    # alle Treffer binnen 3,5 km und die Markenketten (3x Aral, gleicher Preis)
+    # dominierten das Bild. 20 reicht bis ~5-6 km und holt die freien
+    # Tankstellen mit rein. Kostet einen zweiten prices.php-Block.
+    "max_stations": 20,
     # Umkreissuche nur alle N Tage wiederholen (neue/geschlossene Tankstellen).
     "station_refresh_days": 30,
 
