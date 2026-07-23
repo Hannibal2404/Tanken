@@ -81,13 +81,26 @@ CONFIG = {
     "diff_good_ct": 2.0,   # bis hier: gruen
     "diff_warn_ct": 5.0,   # bis hier: gelb, darueber: rot
 
-    # --- Fuer Schritt 2 bereits vorgesehen ---------------------------------
+    # --- Auswertung --------------------------------------------------------
     "tank_liter": 50.0,      # Tankgroesse fuer die Euro-Ersparnis
     # Hinweis, wenn Diesel darunter faellt (EUR/l). Muss zum Marktniveau passen:
     # am 21.07.2026 lag der guenstigste Preis in Buckau bei 2,308 -- eine
     # Schwelle deutlich darunter loest nie aus. Faustregel: knapp unter das,
     # was du an einem guten Tag siehst.
     "alarm_schwelle": 2.25,
+    # Fenster der Tageskurve. Mehr Tage machen die Kurve auf dem Handy flacher;
+    # gezeichnet wird ohnehin nur, soweit Historie da ist.
+    "history_days": 4,
+    # Aufloesung der rekonstruierten Kurve. Die Rohdaten sind eine Treppe, der
+    # Abruf laeuft alle 30 min -- 15 min verliert nichts und glaettet nichts weg.
+    "curve_step_min": 15,
+    # Das Stundenprofil erst zeigen, wenn jede Stunde aus mindestens so vielen
+    # verschiedenen Tagen stammt. Darunter ist es ein Zufallsbild, kein Muster.
+    "hourly_min_days": 2,
+    # ... und nur Tage zaehlen, die so viele Stunden abgedeckt sind. Ein
+    # angebrochener Tag hat ein schiefes Tagesmittel (der erste Messtag begann
+    # mittags, also im teuren Teil) und wuerde das ganze Profil kippen.
+    "hourly_min_hours": 14,
 }
 
 APP_NAME = "Diesel-Tracker"
@@ -329,6 +342,193 @@ def count_history_rows() -> int:
 
 
 # ---------------------------------------------------------------------------
+# 3b. HISTORIE AUSWERTEN
+# ---------------------------------------------------------------------------
+# Grundgedanke: in der CSV steht nur, WANN sich ein Preis geaendert hat. Der
+# Preis dazwischen ist der letzte bekannte -- eine Treppenfunktion. Alles hier
+# baut aus den Stufen wieder einen zeitlich gleichmaessigen Verlauf; ohne das
+# wuerde jede Auswertung die Tankstellen ueberbewerten, die oft nachziehen.
+def month_keys(start: datetime, end: datetime) -> list[str]:
+    """Monats-Dateinamen (YYYY-MM), die das Fenster beruehrt."""
+    keys, cur = [], start.astimezone(timezone.utc).replace(day=1)
+    end = end.astimezone(timezone.utc)
+    while cur <= end:
+        keys.append(f"{cur:%Y-%m}")
+        cur = (cur.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return keys
+
+
+def read_history(start: datetime, end: datetime) -> list[tuple]:
+    """Aenderungen als (zeit, station_id, status, preis|None), chronologisch.
+
+    Gelesen wird ab einem Monat VOR dem Fenster: die Treppe braucht den letzten
+    Preis von davor, sonst beginnt die Kurve mit Luecken."""
+    events: list[tuple] = []
+    for key in month_keys(start - timedelta(days=31), end):
+        path = PRICES_DIR / f"{key}.csv"
+        if not path.exists():
+            continue
+        try:
+            with path.open(encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    ts = parse_iso_utc(row.get("timestamp_utc", ""))
+                    if ts is None or ts > end:
+                        continue
+                    raw = (row.get("diesel") or "").strip()
+                    try:
+                        price = float(raw) if raw else None
+                    except ValueError:
+                        price = None
+                    events.append((ts, row.get("station_id", ""),
+                                   row.get("status", ""), price))
+        except OSError as e:
+            print(f"Warnung: {path.name} nicht lesbar ({e}).", file=sys.stderr)
+    events.sort(key=lambda e: e[0])
+    return events
+
+
+def build_curve(events: list[tuple], start: datetime, end: datetime,
+                step_min: int) -> list[tuple]:
+    """Guenstigster Marktpreis je Zeitschritt -- [(zeit, preis|None), ...].
+
+    None heisst: zu dem Zeitpunkt war keine Tankstelle mit Preis bekannt
+    (ganz am Anfang der Historie, oder nachts alles geschlossen)."""
+    state: dict[str, float | None] = {}
+    step = timedelta(minutes=step_min)
+    pts: list[tuple] = []
+    i = 0
+    # Zustand bis zum Fensterstart vorspulen.
+    while i < len(events) and events[i][0] <= start:
+        _, sid, status, price = events[i]
+        state[sid] = price if status == "open" else None
+        i += 1
+    t = start
+    while t <= end:
+        while i < len(events) and events[i][0] <= t:
+            _, sid, status, price = events[i]
+            state[sid] = price if status == "open" else None
+            i += 1
+        vals = [v for v in state.values() if v is not None]
+        pts.append((t, min(vals) if vals else None))
+        t += step
+    return pts
+
+
+def hourly_profile(pts: list[tuple], tz: ZoneInfo, cfg: dict) -> list[dict]:
+    """Mittlere Abweichung des Bestpreises je Tagesstunde, in ct.
+
+    Bezugsgroesse ist das Mittel des JEWEILIGEN Tages, nicht des Fensters --
+    sonst misst man den Trend der Woche und nicht die Tageszeit. Angebrochene
+    Tage fliegen raus: deren Mittel steht schief, weil ihnen genau die teure
+    oder genau die billige Tageshaelfte fehlt."""
+    min_days = cfg["hourly_min_days"]
+    need = cfg["hourly_min_hours"] * 60 / max(1, cfg["curve_step_min"])
+    by_day: dict = {}
+    for t, v in pts:
+        if v is not None:
+            by_day.setdefault(t.astimezone(tz).date(), []).append(v)
+    day_mean = {d: sum(vs) / len(vs) for d, vs in by_day.items() if len(vs) >= need}
+
+    devs: dict[int, list] = {h: [] for h in range(24)}
+    days: dict[int, set] = {h: set() for h in range(24)}
+    for t, v in pts:
+        if v is None:
+            continue
+        loc = t.astimezone(tz)
+        base = day_mean.get(loc.date())
+        if base is None:
+            continue
+        devs[loc.hour].append((v - base) * 100)
+        days[loc.hour].add(loc.date())
+
+    out = []
+    for h in range(24):
+        if len(days[h]) >= min_days and devs[h]:
+            out.append({"hour": h, "dev_ct": sum(devs[h]) / len(devs[h]),
+                        "days": len(days[h])})
+    return out
+
+
+def price_verdict(current: float | None, pts: list[tuple],
+                  cfg: dict) -> dict | None:
+    """Einordnung des aktuellen Bestpreises im beobachteten Fenster.
+
+    Bewusst ein Perzentil und keine Prognose: mit wenigen Tagen Historie laesst
+    sich sagen, ob der Preis gerade niedrig ist -- nicht, ob er morgen faellt."""
+    vals = sorted(v for _, v in pts if v is not None)
+    if current is None or len(vals) < 16:
+        return None
+    lo, hi = vals[0], vals[-1]
+    ueber_min_eur = (current - lo) * cfg["tank_liter"]
+
+    if hi - lo < 0.0005:
+        return {"cls": "warn", "head": "Unver&auml;ndert",
+                "detail": "Der g&uuml;nstigste Preis hat sich im beobachteten "
+                          "Zeitraum nicht bewegt.",
+                "pct": 0.0, "min": lo, "max": hi}
+
+    # Getrennt zaehlen statt "100 minus": wer genau auf dem Tiefstand steht, war
+    # nicht "guenstiger als 100 % der Zeit", sondern gleichauf.
+    below = sum(1 for v in vals if v < current - 0.0005)
+    above = sum(1 for v in vals if v > current + 0.0005)
+    pct = 100.0 * below / len(vals)
+
+    if pct <= 25:
+        cls, head = "good", "Guter Zeitpunkt"
+        detail = (f"G&uuml;nstiger als {100.0 * above / len(vals):.0f}&nbsp;% "
+                  f"der beobachteten Zeit. Tanken.")
+    elif pct <= 60:
+        cls, head = "warn", "Mittelfeld"
+        detail = (f"Teurer als {pct:.0f}&nbsp;% der beobachteten Zeit &middot; "
+                  f"{fmt_eur(ueber_min_eur)}&nbsp;EUR &uuml;ber dem Tiefstand "
+                  f"auf {cfg['tank_liter']:.0f}&nbsp;l.")
+    else:
+        cls, head = "bad", "Eher teuer"
+        detail = (f"Teurer als {pct:.0f}&nbsp;% der beobachteten Zeit &middot; "
+                  f"{fmt_eur(ueber_min_eur)}&nbsp;EUR &uuml;ber dem Tiefstand "
+                  f"auf {cfg['tank_liter']:.0f}&nbsp;l. Wenn es sich aufschieben "
+                  f"l&auml;sst: warten.")
+    return {"cls": cls, "head": head, "detail": detail, "pct": pct,
+            "min": lo, "max": hi}
+
+
+def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
+    """Alles, was die Auswertung anzeigt. Reine Dateiarbeit -- laeuft auch,
+    wenn der Abruf gescheitert ist, dann eben ohne den letzten Punkt."""
+    tz = ZoneInfo(cfg["timezone"])
+    end = parse_iso_utc((state or {}).get("checked_utc", "")) or now
+    events = read_history(now - timedelta(days=cfg["history_days"]), end)
+    if not events:
+        return None
+
+    # Nicht weiter zurueck als die Historie reicht -- sonst haengt links ein
+    # leerer Streifen an der Kurve.
+    start = max(events[0][0], end - timedelta(days=cfg["history_days"]))
+    pts = build_curve(events, start, end, cfg["curve_step_min"])
+    known = [v for _, v in pts if v is not None]
+    if len(known) < 8:
+        return None
+
+    prices_now = [st.get("diesel") for st in (state.get("stations") or {}).values()
+                  if st.get("diesel") is not None]
+    current = min(prices_now) if prices_now else None
+
+    span_h = (end - start).total_seconds() / 3600
+    return {
+        "pts": pts,
+        "start": start,
+        "end": end,
+        "days": len({t.astimezone(tz).date() for t, v in pts if v is not None}),
+        "span_h": span_h,
+        "min": min(known),
+        "max": max(known),
+        "hours": hourly_profile(pts, tz, cfg),
+        "verdict": price_verdict(current, pts, cfg),
+        "current": current,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 4. DASHBOARD BAUEN
 # ---------------------------------------------------------------------------
 CSS = """
@@ -419,6 +619,36 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .card__diff.warn{color:var(--warn-ink);}
 .card__diff.bad{color:var(--bad-ink);}
 .card__zu{font-size:13.5px;color:var(--faint);font-style:italic;}
+
+/* Einordnung "jetzt tanken oder warten" */
+.verdict{background:var(--chip);border:1px solid var(--line);
+  border-left:5px solid var(--c,var(--line));border-radius:14px;
+  padding:13px 15px;margin-bottom:22px;}
+.verdict.good{--c:var(--good);} .verdict.warn{--c:var(--warn);}
+.verdict.bad{--c:var(--bad);}
+.verdict__t{font-weight:600;font-size:16px;}
+.verdict__t.good{color:var(--good-ink);}
+.verdict__t.warn{color:var(--warn-ink);}
+.verdict__t.bad{color:var(--bad-ink);}
+.verdict__d{color:var(--muted);font-size:13.5px;margin-top:3px;}
+
+/* Diagramme.
+   Die Zeichenflaeche ist bewusst handy-breit (360 Einheiten): ein SVG skaliert
+   seine Schrift mit, eine 700er Flaeche auf 343 px Display macht die
+   Achsenbeschriftung unleserlich. Deshalb oben gedeckelt statt aufgeblasen. */
+.chart{margin-bottom:10px;}
+.chart svg{width:100%;max-width:480px;height:auto;display:block;margin:0 auto;
+  overflow:visible;}
+.chart .ax{fill:var(--faint);font-size:10.5px;font-family:var(--sans);
+  font-variant-numeric:tabular-nums;}
+.chart .grid{stroke:var(--line);stroke-width:1;}
+.chart .line{fill:none;stroke:var(--warn);stroke-width:2.5;
+  stroke-linejoin:round;stroke-linecap:round;}
+.chart .area{fill:var(--warn);opacity:.10;}
+.chart .now{fill:var(--warn);}
+.chart .bar.good{fill:var(--good);} .chart .bar.bad{fill:var(--bad);}
+.chart .zero{stroke:var(--faint);stroke-width:1;}
+.chart-note{color:var(--faint);font-size:12.5px;margin:0 0 26px;line-height:1.55;}
 
 /* Fusszeile */
 .foot{border-top:1px solid var(--line);padding-top:16px;margin-top:8px;
@@ -541,8 +771,147 @@ def address_line(s: dict) -> str:
     return ", ".join(x for x in (street, place) if x)
 
 
+WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+
+def fmt_eur_l(v: float) -> str:
+    return f"{v:.3f}".replace(".", ",")
+
+
+def svg_curve(ana: dict, tz: ZoneInfo) -> str:
+    """Guenstigster Diesel im Zeitverlauf, als Treppe gezeichnet.
+
+    Bewusst keine geglaettete Linie: zwischen zwei Aenderungen gilt der alte
+    Preis unveraendert weiter, eine Diagonale waere eine Erfindung."""
+    W, H = 360, 130
+    L, R, T, B = 38, 6, 10, 20
+    pts = ana["pts"]
+    lo, hi = ana["min"], ana["max"]
+    pad = max(0.004, (hi - lo) * 0.15)
+    y0, y1 = lo - pad, hi + pad
+    t0 = ana["start"].timestamp()
+    tspan = max(1.0, ana["end"].timestamp() - t0)
+
+    def px(t: datetime) -> float:
+        return L + (W - L - R) * (t.timestamp() - t0) / tspan
+
+    def py(v: float) -> float:
+        return T + (H - T - B) * (1 - (v - y0) / (y1 - y0))
+
+    parts = []
+
+    # Waagerechte Hilfslinien mit Preisbeschriftung.
+    # Bei einem ueber das ganze Fenster konstanten Preis waeren die drei
+    # Linien deckungsgleich -- dann reicht eine.
+    levels = (hi,) if hi - lo < 0.0005 else (hi, (hi + lo) / 2, lo)
+    for v in levels:
+        y = py(v)
+        parts.append(f'<line class="grid" x1="{L}" y1="{y:.1f}" '
+                     f'x2="{W - R}" y2="{y:.1f}"/>')
+        parts.append(f'<text class="ax" x="{L - 5}" y="{y + 3.5:.1f}" '
+                     f'text-anchor="end">{fmt_eur_l(v)}</text>')
+
+    # Senkrechte je Mitternacht (Ortszeit) -- Tagesgrenzen als Orientierung.
+    day = ana["start"].astimezone(tz).replace(hour=0, minute=0, second=0,
+                                              microsecond=0) + timedelta(days=1)
+    while day <= ana["end"]:
+        x = px(day)
+        parts.append(f'<line class="grid" x1="{x:.1f}" y1="{T}" '
+                     f'x2="{x:.1f}" y2="{H - B}"/>')
+        # Beschriftung nur, wenn sie nicht ueber den Rand haengt.
+        if L + 28 <= x <= W - R - 28:
+            parts.append(f'<text class="ax" x="{x:.1f}" y="{H - B + 13}" '
+                         f'text-anchor="middle">{WEEKDAYS[day.weekday()]} '
+                         f'{day:%d.%m.}</text>')
+        day += timedelta(days=1)
+
+    # Die Treppe selbst, an Luecken (keine Tankstelle bekannt) unterbrochen.
+    for seg in _segments(pts):
+        d = []
+        for n, (t, v) in enumerate(seg):
+            x, y = px(t), py(v)
+            if n == 0:
+                d.append(f"M{x:.1f} {y:.1f}")
+            else:
+                d.append(f"H{x:.1f} V{y:.1f}")
+        if len(seg) > 1:
+            x_end, x_start = px(seg[-1][0]), px(seg[0][0])
+            parts.append(f'<path class="area" d="{" ".join(d)} '
+                         f'V{H - B} H{x_start:.1f} Z"/>')
+        parts.append(f'<path class="line" d="{" ".join(d)}"/>')
+
+    # Aktueller Stand als Punkt am rechten Ende.
+    last = next(((t, v) for t, v in reversed(pts) if v is not None), None)
+    if last:
+        parts.append(f'<circle class="now" cx="{px(last[0]):.1f}" '
+                     f'cy="{py(last[1]):.1f}" r="3"/>')
+
+    return (f'<div class="chart"><svg viewBox="0 0 {W} {H}" '
+            f'role="img" aria-label="Verlauf des g&uuml;nstigsten Dieselpreises">'
+            f'{"".join(parts)}</svg></div>')
+
+
+def _segments(pts: list[tuple]) -> list[list[tuple]]:
+    """Zerlegt die Punktfolge an den Luecken in zeichenbare Stuecke."""
+    segs, cur = [], []
+    for t, v in pts:
+        if v is None:
+            if len(cur) > 1:
+                segs.append(cur)
+            cur = []
+        else:
+            cur.append((t, v))
+    if len(cur) > 1:
+        segs.append(cur)
+    return segs
+
+
+def svg_hours(hours: list[dict]) -> str:
+    """Tagesstunden als Abweichung vom Tagesmittel, in ct.
+
+    Nach unten = guenstiger als der Tagesschnitt. Die Richtung traegt die
+    Aussage, die Farbe verstaerkt sie nur."""
+    W, H = 360, 108
+    L, R, T, B = 6, 6, 16, 18
+    span = max(abs(h["dev_ct"]) for h in hours)
+    span = max(span, 0.5)
+    mid = T + (H - T - B) / 2
+    half = (H - T - B) / 2
+    slot = (W - L - R) / 24
+    bw = slot * 0.62
+
+    parts = [f'<line class="zero" x1="{L}" y1="{mid:.1f}" '
+             f'x2="{W - R}" y2="{mid:.1f}"/>']
+    by_hour = {h["hour"]: h["dev_ct"] for h in hours}
+    for h in range(24):
+        x = L + slot * (h + 0.5)
+        if h % 3 == 0:
+            parts.append(f'<text class="ax" x="{x:.1f}" y="{H - B + 12}" '
+                         f'text-anchor="middle">{h}</text>')
+        dev = by_hour.get(h)
+        if dev is None:
+            continue
+        length = abs(dev) / span * half * 0.85
+        # Teurer zeigt nach oben, guenstiger nach unten -- in SVG waechst y
+        # nach unten, deshalb sitzt der teure Balken bei mid - length.
+        cls = "bad" if dev > 0 else "good"
+        y = mid - length if dev > 0 else mid
+        parts.append(f'<rect class="bar {cls}" x="{x - bw / 2:.1f}" '
+                     f'y="{y:.1f}" width="{bw:.1f}" height="{length:.1f}" '
+                     f'rx="2"/>')
+
+    parts.append(f'<text class="ax" x="{L}" y="{T - 5}">+{fmt_ct(span)}'
+                 f'&#8201;ct teurer</text>')
+    parts.append(f'<text class="ax" x="{L}" y="{H - B - 3}">'
+                 f'&#8722;{fmt_ct(span)}&#8201;ct g&uuml;nstiger</text>')
+    return (f'<div class="chart"><svg viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="Preisabweichung nach Tagesstunde">'
+            f'{"".join(parts)}</svg></div>')
+
+
 def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
-               history_rows: int, error: str | None = None) -> str:
+               history_rows: int, error: str | None = None,
+               ana: dict | None = None) -> str:
     tz = ZoneInfo(cfg["timezone"])
     loc = cfg["location"]
     by_id = {s["id"]: s for s in stations}
@@ -642,6 +1011,59 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
     sec_note = (f"{len(open_rows)} offen"
                 + (f", {len(other_rows)} ohne Preis" if other_rows else ""))
 
+    # --- Auswertung: Einordnung, Verlauf, Tagesstunden ---
+    verdict_html = curve_html = hours_html = ""
+    if ana:
+        v = ana["verdict"]
+        if v:
+            unter = ""
+            if best_price is not None and best_price <= cfg["alarm_schwelle"]:
+                unter = (f' Unter deiner Alarmschwelle von '
+                         f'{fmt_eur_l(cfg["alarm_schwelle"])}&nbsp;EUR.')
+            verdict_html = (
+                f'<div class="verdict {v["cls"]}">'
+                f'<div class="verdict__t {v["cls"]}">{v["head"]}</div>'
+                f'<div class="verdict__d">{v["detail"]}{unter}</div></div>'
+            )
+
+        # Beobachtungsdauer ehrlich benennen -- bei zwei Tagen ist das hier
+        # eine Momentaufnahme und kein Muster.
+        if ana["span_h"] >= 48:
+            basis = f"{ana['span_h'] / 24:.0f} Tage"
+        else:
+            basis = f"{ana['span_h']:.0f} Stunden"
+        spread_ct = (ana["max"] - ana["min"]) * 100
+        curve_html = (
+            '<div class="sec-head"><div class="sec-label">Verlauf</div>'
+            f'<div class="sec-note">g&uuml;nstigster Preis, letzte {basis}</div>'
+            '</div>'
+            + svg_curve(ana, tz)
+            + f'<p class="chart-note">Zwischen {fmt_eur_l(ana["min"])} und '
+              f'{fmt_eur_l(ana["max"])}&nbsp;EUR &middot; {fmt_ct(spread_ct)}&nbsp;ct '
+              f'Spanne, das sind {fmt_eur((ana["max"] - ana["min"]) * cfg["tank_liter"])}'
+              f'&nbsp;EUR auf eine {cfg["tank_liter"]:.0f}-l-Tankf&uuml;llung. '
+              f'Gezeichnet als Treppe: zwischen zwei Meldungen gilt der alte '
+              f'Preis weiter.</p>'
+        )
+
+        if ana["hours"]:
+            best_h = min(ana["hours"], key=lambda h: h["dev_ct"])
+            worst_h = max(ana["hours"], key=lambda h: h["dev_ct"])
+            n_days = max(h["days"] for h in ana["hours"])
+            hours_html = (
+                '<div class="sec-head"><div class="sec-label">Tageszeit</div>'
+                f'<div class="sec-note">Abweichung vom Tagesmittel</div></div>'
+                + svg_hours(ana["hours"])
+                + f'<p class="chart-note">Am g&uuml;nstigsten gegen '
+                  f'{best_h["hour"]}&nbsp;Uhr ({fmt_ct(abs(best_h["dev_ct"]))}'
+                  f'&nbsp;ct unter dem Tagesmittel), am teuersten gegen '
+                  f'{worst_h["hour"]}&nbsp;Uhr ({fmt_ct(abs(worst_h["dev_ct"]))}'
+                  f'&nbsp;ct dar&uuml;ber). '
+                  f'Basis sind {n_days} Tage &mdash; genug f&uuml;r eine Tendenz, '
+                  f'nicht f&uuml;r ein Wochenmuster. Stunden ohne ausreichende '
+                  f'Datenlage bleiben leer.</p>'
+            )
+
     return f"""<!doctype html>
 <html lang="de">
 <head>
@@ -663,6 +1085,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
 
   {alert_html}
   {hero_html}
+  {verdict_html}
 
   <div class="legend">
     <span class="lg"><span class="dot" style="background:var(--good)"></span>
@@ -681,9 +1104,13 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
     {"".join(cards)}
   </div>
 
+  {curve_html}
+  {hours_html}
+
   <div class="foot">
-    <strong>{history_rows}</strong> Preis&auml;nderungen aufgezeichnet &middot;
-    Auswertung (Tageskurve, Wochentagsmuster, Preisalarm) folgt in Schritt&nbsp;2.<br>
+    <strong>{history_rows}</strong> Preis&auml;nderungen aufgezeichnet, seit der
+    Tracker l&auml;uft. Wochentagsmuster folgt, sobald mehrere volle Wochen
+    beobachtet sind.<br>
     Preisdaten von
     <a href="https://creativecommons.tankerkoenig.de">Tankerk&ouml;nig</a>
     (Markttransparenzstelle f&uuml;r Kraftstoffe), Lizenz
@@ -731,7 +1158,17 @@ def main() -> int:
         if not stations:
             stations = (load_json(STATIONS_FILE) or {}).get("stations", [])
 
-    html_out = build_html(stations, state, cfg, now, count_history_rows(), error)
+    # Auswertung aus den CSVs -- unabhaengig vom Abruf, damit die Seite auch
+    # bei einem Netzfehler noch Verlauf und Einordnung zeigt.
+    try:
+        ana = analyse_history(state, cfg, now)
+    except Exception as e:                      # nie die ganze Seite riskieren
+        ana = None
+        print(f"Warnung: Auswertung uebersprungen ({type(e).__name__}: {e}).",
+              file=sys.stderr)
+
+    html_out = build_html(stations, state, cfg, now, count_history_rows(),
+                          error, ana)
     (out_dir / "index.html").write_text(html_out, encoding="utf-8")
     print(f"Dashboard geschrieben: {out_dir / 'index.html'}")
 

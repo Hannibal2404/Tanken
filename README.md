@@ -62,7 +62,10 @@ Alles Einstellbare steht im `CONFIG`-Block oben in
 | `station_refresh_days` | wie oft die Umkreissuche wiederholt wird |
 | `diff_good_ct` / `diff_warn_ct` | Farbschwellen für den Aufpreis in Cent |
 | `tank_liter` | Tankgröße für die Euro-Ersparnis (50 l) |
-| `alarm_schwelle` | Preisalarm in EUR/l — greift ab Schritt 2 |
+| `alarm_schwelle` | Hinweis, wenn der günstigste Preis darunter liegt (EUR/l) |
+| `history_days` | Fenster der Verlaufskurve (4 Tage) |
+| `curve_step_min` | Auflösung der rekonstruierten Kurve (15 min) |
+| `hourly_min_days` / `hourly_min_hours` | wann eine Tagesstunde im Profil auftaucht |
 
 Nach einer Änderung von `radius_km`, `max_stations` oder `location` einmal
 manuell mit **Umkreissuche neu durchführen** starten (Häkchen im
@@ -93,7 +96,12 @@ Tankstelle und Tag).
 
 Zeiten stehen konsequent in **UTC**, angezeigt und ausgewertet wird
 **Europe/Berlin**. Sonst zerreißt die Sommerzeitumstellung im Oktober die
-Tageskurve aus Schritt 2.
+Tageskurve.
+
+Weil nur Änderungen in der Datei stehen, baut die Auswertung den Verlauf als
+**Treppe** wieder auf: zwischen zwei Meldungen gilt der letzte Preis weiter.
+Ohne diesen Schritt würden Tankstellen, die häufig nachziehen, jede Statistik
+dominieren.
 
 ### Das Zurück-Committen aus dem Workflow
 
@@ -159,9 +167,22 @@ abgelaufenes Token sieht von außen aus wie „die Seite hängt".
 
 ## Stand
 
-**Schritt 1** (aktuell): aktuelle Preise, günstigste hervorgehoben, Historie
+**Schritt 1** (fertig): aktuelle Preise, günstigste hervorgehoben, Historie
 wird gesammelt.
 
-**Schritt 2** (sobald genug Daten da sind): Tageskurve je Tankstelle,
-„jetzt tanken oder warten?", Wochentagsmuster, Preisalarm, Ersparnis in Euro
-pro Tankfüllung.
+**Schritt 2** (fertig seit 23.07.2026): Verlaufskurve des günstigsten Preises,
+Einordnung „jetzt tanken oder warten?", Tagesstunden-Profil, Preisalarm,
+Ersparnis in Euro pro Tankfüllung.
+
+Die Auswertung liest ausschließlich die CSV-Historie und läuft deshalb auch
+dann, wenn der API-Abruf scheitert. Was sie zeigt, hängt an der Datenmenge:
+
+| Auswertung | Bedingung |
+| --- | --- |
+| Verlauf + Einordnung | ab 16 Messpunkten, also praktisch sofort |
+| Tagesstunden-Profil | jede Stunde aus ≥ `hourly_min_days` Tagen, gezählt werden nur Tage mit ≥ `hourly_min_hours` Stunden Abdeckung |
+| Wochentagsmuster | noch nicht gebaut — braucht mehrere volle Wochen |
+
+Angebrochene Tage bleiben beim Stundenprofil außen vor: ihr Tagesmittel steht
+schief, weil ihnen genau die teure oder genau die billige Tageshälfte fehlt.
+Deshalb sind einzelne Stunden anfangs leer, und das ist richtig so.
