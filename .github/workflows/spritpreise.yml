@@ -69,6 +69,10 @@ jobs:
       - name: Preise abrufen, Historie fortschreiben, Dashboard bauen
         env:
           TANKERKOENIG_API_KEY: ${{ secrets.TANKERKOENIG_API_KEY }}
+          # Seltenheits-Push (optional): ist das Secret NTFY_TOPIC nicht gesetzt,
+          # bleibt der Push komplett aus -- das Skript prueft die Variable selbst.
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
         # Die Umkreissuche laesst sich auf beiden Wegen erzwingen: per Haekchen
         # im Actions-Dialog oder per {"client_payload":{"refresh_stations":true}}
         # im Dispatch-Body. Beim Schedule sind beide null -> normaler Lauf.

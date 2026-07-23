@@ -62,10 +62,17 @@ Alles Einstellbare steht im `CONFIG`-Block oben in
 | `station_refresh_days` | wie oft die Umkreissuche wiederholt wird |
 | `diff_good_ct` / `diff_warn_ct` | Farbschwellen für den Aufpreis in Cent |
 | `tank_liter` | Tankgröße für die Euro-Ersparnis (50 l) |
-| `alarm_schwelle` | Hinweis, wenn der günstigste Preis darunter liegt (EUR/l) |
+| `alarm_schwelle` | Wunschmarke (EUR/l) — bestätigt nur, wird nicht mehr als eigener Alarm gezeigt |
 | `history_days` | Fenster der Verlaufskurve (4 Tage) |
 | `curve_step_min` | Auflösung der rekonstruierten Kurve (15 min) |
 | `hourly_min_days` / `hourly_min_hours` | wann eine Tagesstunde im Profil auftaucht |
+| `fuellungen_pro_monat` | Annahme für die Hochrechnung der Jahresersparnis (2) |
+| `warten_min_ct` | ab wie viel erwartetem Vorteil die Empfehlung zum Warten rät (1,5 ct) |
+| `stale_after_min` | ab welchem Alter die Seite sich selbst als veraltet meldet (90 min) |
+| `trend_days` / `trend_min_days` | Fenster und Mindest-Tageszahl der Trend-Sparkline (30 / 5) |
+| `push_min_history_days` | ab wie vielen Tagen Historie der Push scharf ist (14) |
+| `push_below_floor_ct` | wie weit unter dem üblichen Tagesboden der Push auslöst (2 ct) |
+| `push_reset_ct` / `push_cooldown_h` | Wiederscharf-Schwelle und Mindestpause zwischen Pushes |
 
 Nach einer Änderung von `radius_km`, `max_stations` oder `location` einmal
 manuell mit **Umkreissuche neu durchführen** starten (Häkchen im
@@ -171,8 +178,56 @@ abgelaufenes Token sieht von außen aus wie „die Seite hängt".
 wird gesammelt.
 
 **Schritt 2** (fertig seit 23.07.2026): Verlaufskurve des günstigsten Preises,
-Einordnung „jetzt tanken oder warten?", Tagesstunden-Profil, Preisalarm,
-Ersparnis in Euro pro Tankfüllung.
+Einordnung „jetzt tanken oder warten?", Tagesstunden-Profil, Ersparnis in Euro.
+
+**Ausbau am 23.07.2026:**
+- **Zeitbewusste Empfehlung** — die Einordnung schlägt aus dem Stundenprofil eine
+  konkrete Uhrzeit vor („gegen 19 Uhr ~6 ct günstiger, wenn dein Tank reicht:
+  warten"). Zeigt sie nur, wenn für die aktuelle und spätere Stunde Daten da sind.
+- **Ersparnis in Euro** — die Tageszeit-Spanne umgerechnet auf eine Tankfüllung und
+  aufs Jahr (mit offen genannter Annahme `fuellungen_pro_monat`).
+- **Selbst-Diagnose gegen den stillen Ausfall** — ein paar Zeilen Client-JS
+  vergleichen den eingebackenen Stand mit der Browser-Uhr und blenden eine Warnung
+  ein, wenn er älter als `stale_after_min` ist. Das greift auch dann, wenn der
+  Workflow gar nicht mehr läuft und die Seite sich nicht selbst neu bauen kann —
+  genau der Fall eines abgelaufenen Tokens.
+
+- **Trend-Sparkline** — ein zweites, gröberes Zeitfenster unter der Detailkurve:
+  der Tagestiefstwert je Tag über bis zu `trend_days` Tage. Zeigt, ob der Boden
+  gerade steigt oder fällt — das glättet die Detailkurve weg. Erscheint erst ab
+  `trend_min_days` Tagen.
+- **Seltenheits-Push (ntfy)** — Benachrichtigung *nur* bei einem echten Ausreißer
+  nach unten, nicht täglich. Siehe eigener Abschnitt unten.
+
+Der frühere absolute Preisalarm ist aufgegangen in der relativen Einordnung:
+`alarm_schwelle` bestätigt einen günstigen Stand nur noch, statt als eigener
+Hinweis fast täglich zu feuern.
+
+## Push-Benachrichtigung (optional, ntfy)
+
+Der naive Schwellenalarm wäre Lärm — der Tagestiefstwert liegt fast immer unter
+jeder runden Schwelle, er würde täglich feuern. Deshalb löst der Push nur aus,
+wenn der aktuelle Bestpreis mindestens `push_below_floor_ct` **unter dem üblichen
+Tagesboden** liegt (Median der Tagestiefstwerte im Fenster). Nach einem Push wird
+er stumm, bis der Preis sich um `push_reset_ct` erholt hat (Wiederscharf-Schaltung
+gegen Dauerfeuer), zusätzlich gilt `push_cooldown_h` als Mindestpause. Scharf wird
+er erst ab `push_min_history_days` Tagen Historie — vorher ist jedes neue Tief ein
+Scheinrekord. Der Merker dafür liegt in `data/alerts.json`.
+
+**Ohne Einrichtung ist der Push komplett aus** — das Skript prüft die Umgebungs­-
+variable `NTFY_TOPIC` selbst. Zum Aktivieren:
+
+1. Auf dem Handy die **ntfy**-App installieren (F-Droid/Play/App Store), kostenlos,
+   kein Konto nötig.
+2. Ein schwer zu erratendes Topic abonnieren, z. B. `diesel-mdburg-<zufall>`
+   (wer den Namen kennt, kann mitlesen — daher zufällig wählen).
+3. Denselben Namen als GitHub-Secret `NTFY_TOPIC` hinterlegen (Repo → Settings →
+   Secrets → Actions). Optional `NTFY_SERVER`, falls nicht `https://ntfy.sh`.
+
+Der Workflow reicht das Secret bereits an den Build-Schritt weiter; sobald es
+gesetzt ist und genug Historie vorliegt, kommt beim nächsten echten Tiefstand
+eine Nachricht. Kanal ist bewusst ntfy (reibungslos, kein Konto) — Telegram oder
+Pushover ließen sich analog in `send_ntfy` einhängen.
 
 Die Auswertung liest ausschließlich die CSV-Historie und läuft deshalb auch
 dann, wenn der API-Abruf scheitert. Was sie zeigt, hängt an der Datenmenge:

@@ -101,6 +101,42 @@ CONFIG = {
     # angebrochener Tag hat ein schiefes Tagesmittel (der erste Messtag begann
     # mittags, also im teuren Teil) und wuerde das ganze Profil kippen.
     "hourly_min_hours": 14,
+
+    # --- Empfehlung & Ersparnis --------------------------------------------
+    # Fuer die Hochrechnung der Jahresersparnis. Bewusst konservativ und immer
+    # mit der Annahme daneben geschrieben, damit die Zahl ehrlich bleibt.
+    "fuellungen_pro_monat": 2,
+    # Die Zeit-Empfehlung raet nur zum Warten, wenn spaeter am Tag mindestens so
+    # viel guenstiger zu erwarten ist (ct). Darunter lohnt der Aufwand nicht.
+    "warten_min_ct": 1.5,
+    # Client-seitiger Veraltungshinweis: ist der angezeigte Stand aelter als
+    # dies (Minuten), blendet die Seite selbst eine Warnung ein. Faengt den
+    # stillen Ausfall ab -- wenn der Workflow gar nicht mehr laeuft, kann der
+    # Rebuild sich nicht selbst als veraltet melden, der Browser aber schon.
+    "stale_after_min": 90,
+
+    # --- Laengerfristiger Trend (Sparkline der Tagestiefstwerte) -----------
+    # Zweites, groeberes Zeitfenster neben der 4-Tage-Detailkurve. Zeigt, ob
+    # der Boden gerade steigt oder faellt -- das verdeckt die Detailkurve.
+    "trend_days": 30,
+    # Erst zeichnen, wenn so viele Tage vorliegen. Drei Punkte sind kein Trend.
+    "trend_min_days": 5,
+
+    # --- Seltenheits-Push (ntfy) -------------------------------------------
+    # Push NUR bei einem echten Ausreisser nach unten, nicht taeglich. Kanal
+    # kommt aus der Umgebung (NTFY_TOPIC, gesetzt als GitHub-Secret); fehlt er,
+    # ist der Push komplett aus. Server ueberschreibbar per NTFY_SERVER.
+    # Erst scharf, wenn so viele Tage Historie da sind -- sonst ist jedes neue
+    # Tief ein "Rekord" und es feuert dauernd.
+    "push_min_history_days": 14,
+    # Ausloeser: aktueller Bestpreis liegt mindestens so viele ct unter dem
+    # ueblichen Tagesboden (Median der Tagestiefstwerte im Fenster).
+    "push_below_floor_ct": 2.0,
+    # Nicht erneut pingen, solange der Preis nicht wieder um so viel ct
+    # gestiegen ist -- verhindert Dauerfeuer, solange es guenstig bleibt.
+    "push_reset_ct": 1.0,
+    # Zusaetzliche Sperre in Stunden zwischen zwei Pushes.
+    "push_cooldown_h": 8.0,
 }
 
 APP_NAME = "Diesel-Tracker"
@@ -115,8 +151,12 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 STATIONS_FILE = DATA_DIR / "stations.json"
 LATEST_FILE = DATA_DIR / "latest.json"
+ALERTS_FILE = DATA_DIR / "alerts.json"   # Merker fuer den Seltenheits-Push
 PRICES_DIR = DATA_DIR / "prices"
 CSV_HEADER = ["timestamp_utc", "station_id", "status", "diesel"]
+
+# Seite (fuer die Push-Nachricht). Aus dem Repo ableitbar, aber selten geaendert.
+PAGE_URL = "https://hannibal2404.github.io/Tanken/"
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +382,142 @@ def count_history_rows() -> int:
 
 
 # ---------------------------------------------------------------------------
+# 3a. SELTENHEITS-PUSH  (nur bei echtem Preis-Ausreisser nach unten)
+# ---------------------------------------------------------------------------
+# Absicht: hoechstens ein paar Mal im Monat pingen, nicht taeglich. Ein naiver
+# Schwellenalarm feuert taeglich (der Tagesboden liegt fast immer unter jeder
+# runden Schwelle). Deshalb der Vergleich mit dem *ueblichen* Tagesboden plus
+# eine Wiederscharf-Schaltung: nach einem Push erst wieder armen, wenn der
+# Preis sich erholt hat. Der Merker liegt in data/alerts.json und aendert sich
+# nur bei einem Push oder beim Wiederscharfschalten -- kein Commit-Rauschen.
+def _median(xs: list[float]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def push_decision(current: float | None, lows: list[tuple], alert: dict,
+                  cfg: dict, now: datetime) -> dict:
+    """Reine Entscheidung, ob jetzt gepusht wird -- ohne Seiteneffekt, testbar.
+
+    Gibt {push, reason, floor, state} zurueck. `state` wird immer gespeichert,
+    damit Cooldown und Wiederscharf-Schaltung ueber Laeufe hinweg greifen."""
+    # Merker uebernehmen (Vorbelegung: scharf, noch nie gepusht).
+    armed = alert.get("armed", True)
+    rearm_above = alert.get("rearm_above")
+    last_push_utc = alert.get("last_push_utc")
+    last_push_low = alert.get("last_push_low")
+
+    def keep(reason: str, push: bool = False, floor=None) -> dict:
+        return {"push": push, "reason": reason, "floor": floor,
+                "state": {"armed": armed, "rearm_above": rearm_above,
+                          "last_push_utc": last_push_utc,
+                          "last_push_low": last_push_low}}
+
+    if current is None:
+        return keep("kein aktueller Preis")
+    # Erst scharf, wenn genug Tage Historie da sind -- sonst ist jedes neue Tief
+    # ein "Rekord".
+    if len(lows) < cfg["push_min_history_days"]:
+        return keep(f"zu wenig Historie ({len(lows)} < "
+                    f"{cfg['push_min_history_days']} Tage)")
+
+    # Ueblicher Tagesboden = Median der Tagestiefstwerte OHNE den heutigen Tag
+    # (sonst zieht der aktuelle Tiefstwert seine eigene Vergleichsmarke runter).
+    floor_vals = [v for _, v in lows[:-1]] or [v for _, v in lows]
+    floor = _median(floor_vals)
+    threshold = floor - cfg["push_below_floor_ct"] / 100.0
+
+    # Nach einem Push erst wieder scharf, wenn der Preis sich erholt hat.
+    if not armed and rearm_above is not None and current >= rearm_above - 1e-9:
+        armed = True
+        rearm_above = None
+
+    triggered = current <= threshold + 1e-9
+    cooldown_ok = True
+    if last_push_utc:
+        lp = parse_iso_utc(last_push_utc)
+        if lp is not None:
+            cooldown_ok = (now - lp).total_seconds() / 3600 >= cfg["push_cooldown_h"]
+
+    if armed and triggered and cooldown_ok:
+        armed = False
+        rearm_above = current + cfg["push_reset_ct"] / 100.0
+        last_push_utc = iso_utc(now)
+        last_push_low = current
+        return {"push": True,
+                "reason": f"{(floor - current) * 100:.1f} ct unter dem Boden",
+                "floor": floor,
+                "state": {"armed": armed, "rearm_above": rearm_above,
+                          "last_push_utc": last_push_utc,
+                          "last_push_low": last_push_low}}
+
+    if not triggered:
+        why = "ueber der Ausloeseschwelle"
+    elif not armed:
+        why = "noch nicht wieder scharf (Preis nicht erholt)"
+    else:
+        why = "Cooldown laeuft"
+    return keep(why, floor=floor)
+
+
+def send_ntfy(topic: str, server: str, title: str, body: str, url: str) -> bool:
+    """Schickt eine Nachricht an ntfy. Title-Header nur ASCII (Umlaute wuerden
+    den Header zerlegen) -- die Details stehen im UTF-8-Body."""
+    try:
+        r = httpx.post(
+            f"{server.rstrip('/')}/{topic}",
+            content=body.encode("utf-8"),
+            headers={"Title": title, "Tags": "fuelpump,chart_with_downwards_trend",
+                     "Click": url, "Priority": "default"},
+            timeout=HTTP_TIMEOUT_S,
+        )
+        r.raise_for_status()
+        return True
+    except Exception as e:                        # Netz, ntfy down, falsches Topic
+        print(f"Push fehlgeschlagen: {type(e).__name__}: {e}", file=sys.stderr)
+        return False
+
+
+def maybe_push(current: float | None, label: str, ana: dict | None,
+               cfg: dict, now: datetime) -> None:
+    """Orchestriert den Seltenheits-Push. Ohne NTFY_TOPIC komplett aus --
+    dann wird auch keine alerts.json angelegt."""
+    topic = (os.environ.get("NTFY_TOPIC") or "").strip()
+    if not topic:
+        return
+    server = (os.environ.get("NTFY_SERVER") or "https://ntfy.sh").strip()
+    lows = (ana or {}).get("lows") or []
+
+    alert = load_json(ALERTS_FILE) or {}
+    dec = push_decision(current, lows, alert, cfg, now)
+    save_json(ALERTS_FILE, dec["state"])          # Merker fortschreiben
+
+    if not dec["push"]:
+        print(f"Kein Push: {dec['reason']}.")
+        return
+
+    body = (f"Diesel {fmt_eur_l(current)} EUR/l bei {label} -- "
+            f"{dec['reason']}, so guenstig ist selten. {PAGE_URL}")
+    if send_ntfy(topic, server, "Diesel guenstig", body, PAGE_URL):
+        print(f"Push gesendet: {dec['reason']} ({fmt_eur_l(current)} EUR/l).")
+
+
+def cheapest_label(stations: list[dict], state: dict) -> str:
+    """Name der aktuell guenstigsten offenen Tankstelle -- fuer die Nachricht."""
+    by_id = {s["id"]: s for s in stations}
+    best = None
+    for sid, st in (state.get("stations") or {}).items():
+        d = st.get("diesel")
+        if d is None:
+            continue
+        if best is None or d < best[0]:
+            best = (d, by_id.get(sid))
+    return station_label(best[1]) if best and best[1] else "einer Tankstelle"
+
+
+# ---------------------------------------------------------------------------
 # 3b. HISTORIE AUSWERTEN
 # ---------------------------------------------------------------------------
 # Grundgedanke: in der CSV steht nur, WANN sich ein Preis geaendert hat. Der
@@ -385,6 +561,25 @@ def read_history(start: datetime, end: datetime) -> list[tuple]:
             print(f"Warnung: {path.name} nicht lesbar ({e}).", file=sys.stderr)
     events.sort(key=lambda e: e[0])
     return events
+
+
+def daily_lows(end: datetime, cfg: dict, tz: ZoneInfo) -> list[tuple]:
+    """Tiefster Preis je Kalendertag ueber ein langes Fenster -> [(date, low)].
+
+    Weil die CSV jede Preisstufe festhaelt, ist das Minimum aller gemeldeten
+    offenen Preise eines Tages exakt der Tagesboden -- ohne Treppen-Rekonstruktion.
+    Grundlage fuer Trend-Sparkline und Seltenheits-Push."""
+    start = end - timedelta(days=cfg["trend_days"])
+    start_d = start.astimezone(tz).date()
+    lows: dict = {}
+    for ts, _sid, status, price in read_history(start, end):
+        if status != "open" or price is None:
+            continue
+        d = ts.astimezone(tz).date()
+        if d < start_d:
+            continue
+        lows[d] = price if d not in lows else min(lows[d], price)
+    return sorted(lows.items())
 
 
 def build_curve(events: list[tuple], start: datetime, end: datetime,
@@ -492,6 +687,53 @@ def price_verdict(current: float | None, pts: list[tuple],
             "min": lo, "max": hi}
 
 
+def timing_hint(hours: list[dict], end: datetime, tz: ZoneInfo,
+                cfg: dict) -> dict | None:
+    """Aus dem Stundenprofil eine Handlung ableiten: jetzt oder spaeter?
+
+    Bewusst nur, was die Tageskurve wirklich hergibt -- keine Prognose ins
+    Blaue. Fehlt fuer die aktuelle oder die spaeteren Stunden die Datenlage,
+    schweigt die Funktion lieber, als zu raten (gibt None zurueck)."""
+    if not hours:
+        return None
+    dev = {h["hour"]: h["dev_ct"] for h in hours}
+    cur = end.astimezone(tz).hour
+    if cur not in dev:
+        return None
+    now_dev = dev[cur]
+
+    # Gibt es spaeter heute eine Stunde, die spuerbar guenstiger zu erwarten ist?
+    later = [(h, d) for h, d in dev.items()
+             if h > cur and d <= now_dev - cfg["warten_min_ct"]]
+    if later:
+        best_h, best_d = min(later, key=lambda kv: kv[1])
+        return {"wait": True, "hour": best_h, "gain_ct": now_dev - best_d}
+    # Nichts Guenstigeres in Sicht -- nur dann ermutigen, wenn wir gerade auch
+    # wirklich in der billigen Tageshaelfte sind (unter dem Tagesmittel).
+    if now_dev <= 0.0:
+        return {"wait": False}
+    return None
+
+
+def savings_stat(hours: list[dict], cfg: dict) -> dict | None:
+    """Was die Tageszeit ueber alle Tankstellen hinweg ausmacht, in Euro.
+
+    Grundlage ist die Spanne des Stundenprofils (billigste vs. teuerste
+    Tagesstunde), nicht der einmalige Tagesausreisser -- das ist die Ersparnis,
+    die sich zuverlaessig wiederholen laesst. Unter 3 ct Spanne bleibt der
+    Hinweis weg, sonst wird aus Rauschen eine Aussage."""
+    if not hours:
+        return None
+    best = min(h["dev_ct"] for h in hours)
+    worst = max(h["dev_ct"] for h in hours)
+    swing_ct = worst - best
+    if swing_ct < 3.0:
+        return None
+    per_fill = swing_ct / 100.0 * cfg["tank_liter"]
+    per_year = per_fill * cfg["fuellungen_pro_monat"] * 12
+    return {"swing_ct": swing_ct, "per_fill": per_fill, "per_year": per_year}
+
+
 def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
     """Alles, was die Auswertung anzeigt. Reine Dateiarbeit -- laeuft auch,
     wenn der Abruf gescheitert ist, dann eben ohne den letzten Punkt."""
@@ -514,6 +756,7 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
     current = min(prices_now) if prices_now else None
 
     span_h = (end - start).total_seconds() / 3600
+    hours = hourly_profile(pts, tz, cfg)
     return {
         "pts": pts,
         "start": start,
@@ -522,8 +765,11 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
         "span_h": span_h,
         "min": min(known),
         "max": max(known),
-        "hours": hourly_profile(pts, tz, cfg),
+        "hours": hours,
         "verdict": price_verdict(current, pts, cfg),
+        "timing": timing_hint(hours, end, tz, cfg),
+        "savings": savings_stat(hours, cfg),
+        "lows": daily_lows(end, cfg, tz),
         "current": current,
     }
 
@@ -631,6 +877,23 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .verdict__t.warn{color:var(--warn-ink);}
 .verdict__t.bad{color:var(--bad-ink);}
 .verdict__d{color:var(--muted);font-size:13.5px;margin-top:3px;}
+.verdict__hint{font-size:13.5px;margin-top:9px;padding-top:9px;
+  border-top:1px solid var(--line);display:flex;gap:8px;align-items:flex-start;}
+.verdict__hint b{color:var(--ink);font-weight:600;}
+.verdict__ar{flex:none;color:var(--faint);}
+
+/* Ersparnis-Kachel */
+.savings{background:var(--chip);border:1px solid var(--line);border-radius:14px;
+  padding:14px 16px;margin:0 0 26px;display:flex;gap:15px;align-items:center;}
+.savings__big{font-family:var(--serif);font-weight:600;font-size:clamp(26px,7vw,34px);
+  line-height:1;color:var(--good-ink);white-space:nowrap;flex:none;}
+.savings__d{color:var(--muted);font-size:13px;}
+.savings__d b{color:var(--ink);font-weight:600;}
+/* Auf schmalen Schirmen stapeln -- sonst quetscht sich der Text in 2-Wort-
+   Zeilen neben die grosse Zahl. */
+@media (max-width:520px){
+  .savings{flex-direction:column;align-items:flex-start;gap:7px;}
+}
 
 /* Diagramme.
    Die Zeichenflaeche ist bewusst handy-breit (360 Einheiten): ein SVG skaliert
@@ -648,6 +911,9 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .chart .now{fill:var(--warn);}
 .chart .bar.good{fill:var(--good);} .chart .bar.bad{fill:var(--bad);}
 .chart .zero{stroke:var(--faint);stroke-width:1;}
+.chart .spark{fill:none;stroke:var(--muted);stroke-width:2;
+  stroke-linejoin:round;stroke-linecap:round;}
+.chart .spark-dot{fill:var(--ink);}
 .chart-note{color:var(--faint);font-size:12.5px;margin:0 0 26px;line-height:1.55;}
 
 /* Fusszeile */
@@ -772,6 +1038,31 @@ def address_line(s: dict) -> str:
 
 
 WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+# Client-seitiger Veraltungshinweis. Laeuft im Browser, nicht beim Bauen --
+# das ist der Witz: wenn der Workflow ausfaellt, wird die Seite nicht mehr neu
+# gebaut und kann sich selbst nicht als alt melden. Der Browser vergleicht den
+# eingebackenen Stand mit seiner eigenen Uhr und blendet die Warnung ein.
+# __CHECKED__ ist ein UTC-Zeitstempel (oder leer -> Skript tut nichts),
+# __LIMIT__ die Schwelle in Minuten. Beide werden beim Bauen ersetzt.
+STALE_JS = """<script>
+(function(){
+  var checked = "__CHECKED__", limit = __LIMIT__;
+  if(!checked) return;
+  var box = document.getElementById('stale'), txt = document.getElementById('stale-d');
+  if(!box || !txt) return;
+  function upd(){
+    var age = (Date.now() - Date.parse(checked)) / 60000;
+    if(age > limit){
+      var h = Math.floor(age/60), m = Math.round(age%60);
+      txt.textContent = 'Der angezeigte Stand ist ' + (h ? h + ' Std ' : '')
+        + m + ' Min alt. Der automatische Abruf haengt moeglicherweise.';
+      box.hidden = false;
+    } else { box.hidden = true; }
+  }
+  upd(); setInterval(upd, 60000);
+})();
+</script>"""
 
 
 def fmt_eur_l(v: float) -> str:
@@ -909,6 +1200,44 @@ def svg_hours(hours: list[dict]) -> str:
             f'{"".join(parts)}</svg></div>')
 
 
+def svg_sparkline(lows: list[tuple]) -> str:
+    """Tagestiefstwerte als kleine Linie -- zeigt den Trend des Bodens.
+
+    Bewusst schlicht: ein Punkt je Tag, Linie dazwischen, erster und letzter
+    Wert beschriftet. Kein Gitter, keine Achsen -- es geht nur um die Richtung."""
+    W, H = 360, 66
+    L, R, T, B = 40, 34, 10, 12
+    vals = [v for _, v in lows]
+    lo, hi = min(vals), max(vals)
+    pad = max(0.003, (hi - lo) * 0.2)
+    y0, y1 = lo - pad, hi + pad
+    n = len(lows)
+
+    def px(i: int) -> float:
+        return L + (W - L - R) * (i / (n - 1) if n > 1 else 0.5)
+
+    def py(v: float) -> float:
+        return T + (H - T - B) * (1 - (v - y0) / (y1 - y0))
+
+    pts_attr = " ".join(f"{px(i):.1f},{py(v):.1f}"
+                        for i, (_, v) in enumerate(lows))
+    parts = [f'<polyline class="spark" points="{pts_attr}"/>']
+    # Nur den ersten und letzten Punkt betonen, sonst wird es unruhig.
+    for i in (0, n - 1):
+        _, v = lows[i]
+        parts.append(f'<circle class="spark-dot" cx="{px(i):.1f}" '
+                     f'cy="{py(v):.1f}" r="2.6"/>')
+    # Wertebeschriftung links (erster) und rechts (letzter).
+    parts.append(f'<text class="ax" x="{L - 5}" y="{py(lows[0][1]) + 3.5:.1f}" '
+                 f'text-anchor="end">{fmt_eur_l(lows[0][1])}</text>')
+    parts.append(f'<text class="ax" x="{W - R + 5}" '
+                 f'y="{py(lows[-1][1]) + 3.5:.1f}" text-anchor="start">'
+                 f'{fmt_eur_l(lows[-1][1])}</text>')
+    return (f'<div class="chart"><svg viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="Tagestiefstwerte im Zeitverlauf">'
+            f'{"".join(parts)}</svg></div>')
+
+
 def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
                history_rows: int, error: str | None = None,
                ana: dict | None = None) -> str:
@@ -1011,19 +1340,55 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
     sec_note = (f"{len(open_rows)} offen"
                 + (f", {len(other_rows)} ohne Preis" if other_rows else ""))
 
+    # Veraltungshinweis (leerer Container + Skript, per Browser-Uhr gesteuert).
+    stale_script = (STALE_JS
+                    .replace("__CHECKED__", iso_utc(checked))
+                    .replace("__LIMIT__", str(int(cfg["stale_after_min"]))))
+    stale_box = (
+        '<div id="stale" class="alert" hidden>'
+        '<div class="alert__ic">&#9888;&#65039;</div><div>'
+        '<div class="alert__t">Daten m&ouml;glicherweise veraltet</div>'
+        '<div class="alert__d" id="stale-d"></div></div></div>'
+    )
+
     # --- Auswertung: Einordnung, Verlauf, Tagesstunden ---
     verdict_html = curve_html = hours_html = ""
     if ana:
         v = ana["verdict"]
         if v:
+            # Den absoluten Schwellen-Hinweis nur zeigen, wenn die Einordnung
+            # ohnehin "guenstig" sagt -- sonst stuende "eher teuer" direkt neben
+            # "unter deiner Schwelle" (die 2,25 sind bewusst locker gesetzt und
+            # werden fast taeglich unterschritten). Die relative Einordnung ist
+            # das staerkere Signal; die Schwelle bestaetigt sie nur.
             unter = ""
-            if best_price is not None and best_price <= cfg["alarm_schwelle"]:
-                unter = (f' Unter deiner Alarmschwelle von '
+            if (v["cls"] == "good" and best_price is not None
+                    and best_price <= cfg["alarm_schwelle"]):
+                unter = (f' Und unter deiner Wunschmarke von '
                          f'{fmt_eur_l(cfg["alarm_schwelle"])}&nbsp;EUR.')
+            # Zeitbewusste Empfehlung aus dem Stundenprofil -- nur wenn vorhanden.
+            hint = ana.get("timing")
+            hint_html = ""
+            if hint and hint.get("wait"):
+                hint_html = (
+                    '<div class="verdict__hint"><span class="verdict__ar">'
+                    '&#8595;</span><div>Erfahrungsgem&auml;&szlig; ist es gegen '
+                    f'<b>{hint["hour"]}&nbsp;Uhr</b> am g&uuml;nstigsten, rund '
+                    f'{fmt_ct(hint["gain_ct"])}&nbsp;ct billiger als jetzt. '
+                    'Wenn dein Tank reicht: sp&auml;ter tanken.</div></div>'
+                )
+            elif hint is not None:
+                hint_html = (
+                    '<div class="verdict__hint"><span class="verdict__ar">'
+                    '&#10003;</span><div>Du bist in der g&uuml;nstigen Tageszeit '
+                    '&mdash; sp&auml;ter wird es erfahrungsgem&auml;&szlig; nicht '
+                    'billiger.</div></div>'
+                )
             verdict_html = (
                 f'<div class="verdict {v["cls"]}">'
                 f'<div class="verdict__t {v["cls"]}">{v["head"]}</div>'
-                f'<div class="verdict__d">{v["detail"]}{unter}</div></div>'
+                f'<div class="verdict__d">{v["detail"]}{unter}</div>'
+                f'{hint_html}</div>'
             )
 
         # Beobachtungsdauer ehrlich benennen -- bei zwei Tagen ist das hier
@@ -1046,6 +1411,34 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
               f'Preis weiter.</p>'
         )
 
+        # --- Laengerfristiger Trend: Tagestiefstwerte ---
+        lows = ana.get("lows") or []
+        if len(lows) >= cfg["trend_min_days"]:
+            first_v, last_v = lows[0][1], lows[-1][1]
+            delta_ct = (last_v - first_v) * 100
+            days_span = (lows[-1][0] - lows[0][0]).days or len(lows)
+            if delta_ct > 1.0:
+                pfeil, rich = "&#8599;", (f"gestiegen (+{fmt_ct(delta_ct)}&nbsp;ct "
+                                         f"in {days_span} Tagen)")
+            elif delta_ct < -1.0:
+                pfeil, rich = "&#8600;", (f"gefallen ({fmt_ct(delta_ct)}&nbsp;ct "
+                                          f"in {days_span} Tagen)")
+            else:
+                pfeil, rich = "&#8594;", f"seitw&auml;rts (letzte {days_span} Tage)"
+            tief = min(v for _, v in lows)
+            curve_html += (
+                '<div class="sec-head" style="margin-top:24px">'
+                '<div class="sec-label">Trend</div>'
+                f'<div class="sec-note">Tagestiefstwerte, letzte {len(lows)} Tage'
+                '</div></div>'
+                + svg_sparkline(lows)
+                + f'<p class="chart-note">Der g&uuml;nstigste Tagespreis ist '
+                  f'{pfeil}&nbsp;{rich}. Niedrigster Tagesboden im Fenster: '
+                  f'{fmt_eur_l(tief)}&nbsp;EUR. Anders als die Detailkurve oben '
+                  f'gl&auml;ttet das die Tagesschwankung weg und zeigt nur die '
+                  f'Richtung.</p>'
+            )
+
         if ana["hours"]:
             best_h = min(ana["hours"], key=lambda h: h["dev_ct"])
             worst_h = max(ana["hours"], key=lambda h: h["dev_ct"])
@@ -1062,6 +1455,20 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
                   f'Basis sind {n_days} Tage &mdash; genug f&uuml;r eine Tendenz, '
                   f'nicht f&uuml;r ein Wochenmuster. Stunden ohne ausreichende '
                   f'Datenlage bleiben leer.</p>'
+            )
+
+        # --- Ersparnis in Euro (aus der Tageszeit-Spanne) ---
+        sv = ana.get("savings")
+        if sv:
+            n = cfg["fuellungen_pro_monat"]
+            hours_html += (
+                f'<div class="savings"><div class="savings__big">rund '
+                f'{fmt_eur(sv["per_fill"])}&nbsp;EUR</div><div class="savings__d">'
+                f'Unterschied pro Tankf&uuml;llung ({cfg["tank_liter"]:.0f}&nbsp;l) '
+                f'zwischen der g&uuml;nstigsten und der teuersten Tageszeit. '
+                f'Wer konsequent zur billigen Zeit tankt, spart bei {n}&nbsp;'
+                f'F&uuml;llungen im Monat rund <b>{fmt_eur(sv["per_year"])}&nbsp;'
+                f'EUR im Jahr</b>.</div></div>'
             )
 
     return f"""<!doctype html>
@@ -1083,6 +1490,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
       {html.escape(loc['street'])} &middot; Stand {stand}</p>
   </header>
 
+  {stale_box}
   {alert_html}
   {hero_html}
   {verdict_html}
@@ -1117,6 +1525,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
     <a href="https://creativecommons.org/licenses/by/4.0/">CC&nbsp;BY&nbsp;4.0</a>.
     Alle Angaben ohne Gew&auml;hr &middot; nicht-kommerzielle Nutzung.
   </div>
+{stale_script}
 </body>
 </html>
 """
@@ -1166,6 +1575,16 @@ def main() -> int:
         ana = None
         print(f"Warnung: Auswertung uebersprungen ({type(e).__name__}: {e}).",
               file=sys.stderr)
+
+    # Seltenheits-Push -- nur bei frischem Abruf (bei einem Fehler haben wir
+    # keinen aktuellen Preis) und nie die Seite riskieren.
+    if error is None and ana:
+        try:
+            maybe_push(ana.get("current"), cheapest_label(stations, state),
+                       ana, cfg, now)
+        except Exception as e:
+            print(f"Warnung: Push uebersprungen ({type(e).__name__}: {e}).",
+                  file=sys.stderr)
 
     html_out = build_html(stations, state, cfg, now, count_history_rows(),
                           error, ana)
