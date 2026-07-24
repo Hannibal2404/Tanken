@@ -806,6 +806,11 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .alert{display:flex;gap:11px;align-items:flex-start;background:var(--chip);
   border:1px solid var(--line);border-left:4px solid var(--bad);
   border-radius:12px;padding:12px 14px;margin-bottom:20px;}
+/* MUSS nach .alert stehen und braucht den Attribut-Selektor: ein eigenes
+   display: in einer Author-Regel schlaegt die eingebaute Browser-Regel
+   [hidden]{display:none}. Ohne das hier waere der Veraltungs-Kasten immer
+   sichtbar -- nur eben ohne Text, weil das Skript nichts hineinschreibt. */
+.alert[hidden]{display:none;}
 .alert__ic{font-size:20px;flex:none;line-height:1.2;}
 .alert__t{font-weight:600;font-size:15px;}
 .alert__d{color:var(--muted);font-size:13px;margin-top:2px;}
