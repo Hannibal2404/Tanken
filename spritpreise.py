@@ -1560,8 +1560,8 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
                   f'&nbsp;ct unter dem Tagesmittel), am teuersten gegen '
                   f'{worst_h["hour"]}&nbsp;Uhr ({fmt_ct(abs(worst_h["dev_ct"]))}'
                   f'&nbsp;ct dar&uuml;ber). '
-                  f'Basis sind {n_days} Tage &mdash; genug f&uuml;r eine Tendenz, '
-                  f'nicht f&uuml;r ein Wochenmuster. Stunden ohne ausreichende '
+                  f'Basis sind {n_days} Tage &mdash; genug f&uuml;r eine Tendenz '
+                  f'&uuml;ber den Tag. Stunden ohne ausreichende '
                   f'Datenlage bleiben leer.</p>'
             )
 
