@@ -91,6 +91,14 @@ CONFIG = {
     # Fenster der Tageskurve. Mehr Tage machen die Kurve auf dem Handy flacher;
     # gezeichnet wird ohnehin nur, soweit Historie da ist.
     "history_days": 4,
+    # Fenster fuer die AGGREGIERTE Auswertung (Tageszeit-Profil, Einordnung,
+    # Ersparnis) -- bewusst getrennt von der schmalen Detailkurve oben. Hier
+    # zaehlt Datenmenge, nicht Lesbarkeit: je mehr Tage, desto ruhiger das
+    # Stundenprofil und desto ehrlicher die Euro-Spanne. Das Profil rechnet
+    # tagesrelativ, ein langes Fenster verwaescht den Preistrend also nicht,
+    # sondern mittelt nur die Tageszeit sauberer. Gedeckelt durch die vorhandene
+    # Historie -- 30 Tage ist reichlich und waechst von selbst mit.
+    "profile_days": 30,
     # Aufloesung der rekonstruierten Kurve. Die Rohdaten sind eine Treppe, der
     # Abruf laeuft alle 30 min -- 15 min verliert nichts und glaettet nichts weg.
     "curve_step_min": 15,
@@ -736,17 +744,32 @@ def savings_stat(hours: list[dict], cfg: dict) -> dict | None:
 
 def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
     """Alles, was die Auswertung anzeigt. Reine Dateiarbeit -- laeuft auch,
-    wenn der Abruf gescheitert ist, dann eben ohne den letzten Punkt."""
+    wenn der Abruf gescheitert ist, dann eben ohne den letzten Punkt.
+
+    Zwei Zeitfenster aus EINER Historie-Lesung:
+      - profile_pts ueber cfg["profile_days"] speist Tageszeit-Profil, Einordnung
+        und Ersparnis. Je mehr Tage, desto belastbarer -- das Profil rechnet
+        tagesrelativ, ein langes Fenster verwaescht den Preistrend also nicht,
+        sondern mittelt nur die Tageszeit sauberer.
+      - pts ueber cfg["history_days"] ist die schmale Detailkurve zum Zeichnen;
+        die bleibt kurz, damit sie auf dem Handy lesbar bleibt.
+    """
     tz = ZoneInfo(cfg["timezone"])
     end = parse_iso_utc((state or {}).get("checked_utc", "")) or now
-    events = read_history(now - timedelta(days=cfg["history_days"]), end)
+
+    # Eine Lesung ueber das laengere Fenster -- die kurze Kurve ist nur ein
+    # Ausschnitt davon, ein zweites Einlesen waere Verschwendung.
+    events = read_history(now - timedelta(days=cfg["profile_days"]), end)
     if not events:
         return None
 
-    # Nicht weiter zurueck als die Historie reicht -- sonst haengt links ein
-    # leerer Streifen an der Kurve.
-    start = max(events[0][0], end - timedelta(days=cfg["history_days"]))
-    pts = build_curve(events, start, end, cfg["curve_step_min"])
+    # Beide Fenster nicht weiter zurueck als die Historie reicht, sonst haengt
+    # links ein leerer Streifen an der Kurve.
+    p_start = max(events[0][0], end - timedelta(days=cfg["profile_days"]))
+    c_start = max(events[0][0], end - timedelta(days=cfg["history_days"]))
+    profile_pts = build_curve(events, p_start, end, cfg["curve_step_min"])
+    pts = build_curve(events, c_start, end, cfg["curve_step_min"])
+
     known = [v for _, v in pts if v is not None]
     if len(known) < 8:
         return None
@@ -755,18 +778,18 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
                   if st.get("diesel") is not None]
     current = min(prices_now) if prices_now else None
 
-    span_h = (end - start).total_seconds() / 3600
-    hours = hourly_profile(pts, tz, cfg)
+    span_h = (end - c_start).total_seconds() / 3600
+    hours = hourly_profile(profile_pts, tz, cfg)
     return {
         "pts": pts,
-        "start": start,
+        "start": c_start,
         "end": end,
         "days": len({t.astimezone(tz).date() for t, v in pts if v is not None}),
         "span_h": span_h,
         "min": min(known),
         "max": max(known),
         "hours": hours,
-        "verdict": price_verdict(current, pts, cfg),
+        "verdict": price_verdict(current, profile_pts, cfg),
         "timing": timing_hint(hours, end, tz, cfg),
         "savings": savings_stat(hours, cfg),
         "lows": daily_lows(end, cfg, tz),
