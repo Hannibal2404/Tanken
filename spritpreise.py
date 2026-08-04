@@ -109,6 +109,11 @@ CONFIG = {
     # angebrochener Tag hat ein schiefes Tagesmittel (der erste Messtag begann
     # mittags, also im teuren Teil) und wuerde das ganze Profil kippen.
     "hourly_min_hours": 14,
+    # Wochentags-Profil erst zeigen, wenn jeder Wochentag aus mindestens so
+    # vielen Wochen stammt. Bei einer einzigen Beobachtung je Tag ist es ein
+    # Zufallsbild; ab zwei Wochen eine (noch grobe) Tendenz. Der Preistrend wird
+    # vorher herausgerechnet, sonst misst man die Wochendrift statt des Tags.
+    "weekday_min_weeks": 2,
 
     # --- Empfehlung & Ersparnis --------------------------------------------
     # Fuer die Hochrechnung der Jahresersparnis. Bewusst konservativ und immer
@@ -742,6 +747,41 @@ def savings_stat(hours: list[dict], cfg: dict) -> dict | None:
     return {"swing_ct": swing_ct, "per_fill": per_fill, "per_year": per_year}
 
 
+def weekday_profile(lows: list[tuple], cfg: dict) -> list[dict] | None:
+    """Mittlere Abweichung des Tagestiefstwerts je Wochentag, trendbereinigt (ct).
+
+    Der Preisboden driftet ueber Wochen; ohne Trendabzug misst man diese Drift
+    statt des Wochentags -- ueber zwei Wochen ist der Trend leicht so gross wie
+    das Wochentagssignal selbst. Deshalb erst eine Ausgleichsgerade durch die
+    Tagestiefstwerte legen (Regression von Hand, keine Abhaengigkeit), dann die
+    Residuen je Wochentag mitteln. Bewusst zurueckhaltend: erst ab
+    cfg["weekday_min_weeks"] Wochen Historie, jeder gezeigte Wochentag muss aus
+    so vielen Wochen stammen, und es wird nur gezeichnet, wenn fast alle sieben
+    Tage abgedeckt sind -- ein Lueckenbild verwirrt mehr als es sagt."""
+    min_weeks = cfg["weekday_min_weeks"]
+    n = len(lows)
+    if n < min_weeks * 7:
+        return None
+
+    # Lineare Ausgleichsgerade durch die Tagestiefstwerte (x = Tagesindex).
+    xs = list(range(n))
+    vals = [v for _, v in lows]
+    mx = sum(xs) / n
+    my = sum(vals) / n
+    denom = sum((x - mx) ** 2 for x in xs) or 1.0
+    b1 = sum((xs[i] - mx) * (vals[i] - my) for i in range(n)) / denom
+    b0 = my - b1 * mx
+
+    by_wd: dict[int, list] = {i: [] for i in range(7)}
+    for i, (d, v) in enumerate(lows):
+        by_wd[d.weekday()].append((v - (b0 + b1 * xs[i])) * 100)
+
+    out = [{"wd": wd, "dev_ct": sum(vs) / len(vs), "weeks": len(vs)}
+           for wd in range(7) for vs in [by_wd[wd]] if len(vs) >= min_weeks]
+    # Erst zeigen, wenn hoechstens ein Wochentag fehlt.
+    return out if len(out) >= 6 else None
+
+
 def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
     """Alles, was die Auswertung anzeigt. Reine Dateiarbeit -- laeuft auch,
     wenn der Abruf gescheitert ist, dann eben ohne den letzten Punkt.
@@ -780,6 +820,7 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
 
     span_h = (end - c_start).total_seconds() / 3600
     hours = hourly_profile(profile_pts, tz, cfg)
+    lows = daily_lows(end, cfg, tz)
     return {
         "pts": pts,
         "start": c_start,
@@ -792,7 +833,8 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
         "verdict": price_verdict(current, profile_pts, cfg),
         "timing": timing_hint(hours, end, tz, cfg),
         "savings": savings_stat(hours, cfg),
-        "lows": daily_lows(end, cfg, tz),
+        "lows": lows,
+        "weekday": weekday_profile(lows, cfg),
         "current": current,
     }
 
@@ -1066,6 +1108,8 @@ def address_line(s: dict) -> str:
 
 
 WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+WEEKDAY_FULL = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag",
+                "Samstag", "Sonntag"]
 
 # Client-seitiger Veraltungshinweis. Laeuft im Browser, nicht beim Bauen --
 # das ist der Witz: wenn der Workflow ausfaellt, wird die Seite nicht mehr neu
@@ -1225,6 +1269,42 @@ def svg_hours(hours: list[dict]) -> str:
                  f'&#8722;{fmt_ct(span)}&#8201;ct g&uuml;nstiger</text>')
     return (f'<div class="chart"><svg viewBox="0 0 {W} {H}" role="img" '
             f'aria-label="Preisabweichung nach Tagesstunde">'
+            f'{"".join(parts)}</svg></div>')
+
+
+def svg_weekday(wds: list[dict]) -> str:
+    """Wochentage als Abweichung vom Preistrend, in ct. Wie svg_hours, nur mit
+    sieben Balken statt 24. Nach unten = an dem Tag typischerweise guenstiger."""
+    W, H = 360, 112
+    L, R, T, B = 6, 6, 16, 22
+    span = max(max(abs(d["dev_ct"]) for d in wds), 0.5)
+    mid = T + (H - T - B) / 2
+    half = (H - T - B) / 2
+    slot = (W - L - R) / 7
+    bw = slot * 0.5
+
+    parts = [f'<line class="zero" x1="{L}" y1="{mid:.1f}" '
+             f'x2="{W - R}" y2="{mid:.1f}"/>']
+    by_wd = {d["wd"]: d["dev_ct"] for d in wds}
+    for wd in range(7):
+        x = L + slot * (wd + 0.5)
+        parts.append(f'<text class="ax" x="{x:.1f}" y="{H - B + 14}" '
+                     f'text-anchor="middle">{WEEKDAYS[wd]}</text>')
+        dev = by_wd.get(wd)
+        if dev is None:
+            continue
+        length = abs(dev) / span * half * 0.85
+        cls = "bad" if dev > 0 else "good"
+        y = mid - length if dev > 0 else mid
+        parts.append(f'<rect class="bar {cls}" x="{x - bw / 2:.1f}" '
+                     f'y="{y:.1f}" width="{bw:.1f}" height="{length:.1f}" rx="2"/>')
+
+    parts.append(f'<text class="ax" x="{L}" y="{T - 5}">+{fmt_ct(span)}'
+                 f'&#8201;ct teurer</text>')
+    parts.append(f'<text class="ax" x="{L}" y="{H - B - 3}">'
+                 f'&#8722;{fmt_ct(span)}&#8201;ct g&uuml;nstiger</text>')
+    return (f'<div class="chart"><svg viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="Preisabweichung nach Wochentag">'
             f'{"".join(parts)}</svg></div>')
 
 
@@ -1485,6 +1565,37 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
                   f'Datenlage bleiben leer.</p>'
             )
 
+        # --- Wochentag: welcher Tag ist typischerweise guenstiger? ---
+        wd = ana.get("weekday")
+        if wd:
+            best_wd = min(wd, key=lambda d: d["dev_ct"])
+            worst_wd = max(wd, key=lambda d: d["dev_ct"])
+            weeks = max(d["weeks"] for d in wd)
+            # Nur dann eine Richtung behaupten, wenn zwischen guenstigstem und
+            # teuerstem Tag ueberhaupt Abstand ist -- sonst waere es Rauschen.
+            spread = worst_wd["dev_ct"] - best_wd["dev_ct"]
+            if spread >= 1.0:
+                aussage = (f'Im Schnitt am g&uuml;nstigsten am '
+                           f'<b>{WEEKDAY_FULL[best_wd["wd"]]}</b> '
+                           f'({fmt_ct(abs(best_wd["dev_ct"]))}&nbsp;ct unter dem '
+                           f'Trend), am teuersten am '
+                           f'{WEEKDAY_FULL[worst_wd["wd"]]} '
+                           f'(+{fmt_ct(worst_wd["dev_ct"])}&nbsp;ct). ')
+            else:
+                aussage = ('Bislang trennt die Wochentage kaum mehr als das '
+                           'Rauschen &mdash; kein klarer g&uuml;nstiger Tag. ')
+            hours_html += (
+                '<div class="sec-head" style="margin-top:24px">'
+                '<div class="sec-label">Wochentag</div>'
+                '<div class="sec-note">Abweichung vom Preistrend</div></div>'
+                + svg_weekday(wd)
+                + f'<p class="chart-note">{aussage}Erst {weeks} Wochen '
+                  f'beobachtet &mdash; ein vorl&auml;ufiges Bild, das sich mit '
+                  f'jeder Woche sch&auml;rft. Der l&auml;ngerfristige Preistrend '
+                  f'ist herausgerechnet, damit hier die Tageswahl steht und nicht '
+                  f'die Preisentwicklung.</p>'
+            )
+
         # --- Ersparnis in Euro (aus der Tageszeit-Spanne) ---
         sv = ana.get("savings")
         if sv:
@@ -1498,6 +1609,13 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
                 f'F&uuml;llungen im Monat rund <b>{fmt_eur(sv["per_year"])}&nbsp;'
                 f'EUR im Jahr</b>.</div></div>'
             )
+
+    # Die "folgt noch"-Zusage in der Fusszeile nur, solange der Wochentags-
+    # Abschnitt mangels Datenlage noch nicht erscheint -- sonst widerspricht sie
+    # dem, was direkt darueber steht.
+    wd_promise = ("" if (ana and ana.get("weekday"))
+                  else " Wochentagsmuster folgt, sobald mehrere volle Wochen "
+                       "beobachtet sind.")
 
     return f"""<!doctype html>
 <html lang="de">
@@ -1545,8 +1663,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
 
   <div class="foot">
     <strong>{history_rows}</strong> Preis&auml;nderungen aufgezeichnet, seit der
-    Tracker l&auml;uft. Wochentagsmuster folgt, sobald mehrere volle Wochen
-    beobachtet sind.<br>
+    Tracker l&auml;uft.{wd_promise}<br>
     Preisdaten von
     <a href="https://creativecommons.tankerkoenig.de">Tankerk&ouml;nig</a>
     (Markttransparenzstelle f&uuml;r Kraftstoffe), Lizenz
