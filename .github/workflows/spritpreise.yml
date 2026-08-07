@@ -38,10 +38,15 @@ permissions:
   pages: write      # GitHub-Pages-Deploy
   id-token: write   # OIDC-Token fuer deploy-pages
 
-# Nie zwei Laeufe gleichzeitig -- sonst schreiben beide am selben Branch.
-concurrency:
-  group: spritpreise
-  cancel-in-progress: false
+# BEWUSST keine Workflow-weite concurrency mehr. Frueher lag sie ueber build UND
+# deploy -- damit brach ein haengender Deploy die nachfolgenden, schnellen
+# Daten-Builds als "pending" gleich mit ab (GitHub verwirft wartende Laeufe einer
+# Gruppe). Genau das kostete am 2026-08-06, als GitHub Pages stundenlang klemmte,
+# ~7 h Preishistorie -- und die laesst sich nicht nachladen. Jetzt sitzt die
+# concurrency nur noch auf dem deploy-Job (siehe unten): der Daten-Build laeuft
+# immer sofort und ungestoert durch. Zwei Builds gleichzeitig sind hier ohnehin
+# kaum moeglich (ein Lauf dauert Sekunden, der naechste kommt fruehestens in 20
+# Min) und faengt der rebase-Retry-Loop im Commit-Schritt sauber ab.
 
 jobs:
   build:
@@ -110,6 +115,14 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Nur der Deploy wird serialisiert -- getrennt vom Daten-Build. cancel-in-
+    # progress: true, weil die Seite bei jedem Lauf komplett neu entsteht: ein
+    # haengender oder aelterer Deploy darf gefahrlos vom neueren ueberholt werden,
+    # der frischere Stand gewinnt. Damit blockiert ein klemmender Pages-Deploy
+    # nichts mehr, was Datenlage kostet.
+    concurrency:
+      group: spritpreise-pages
+      cancel-in-progress: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
