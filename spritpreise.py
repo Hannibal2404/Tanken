@@ -1584,16 +1584,27 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
             else:
                 aussage = ('Bislang trennt die Wochentage kaum mehr als das '
                            'Rauschen &mdash; kein klarer g&uuml;nstiger Tag. ')
+            # Reife-abhaengiger Zusatz: unter drei Wochen ist es ein vorlaeufiges
+            # Bild, ab drei Wochen ein belastbarer, aber kleiner Effekt. Bewusst
+            # ehrlich: mit mehr Daten schrumpft die Wochentags-Spanne (das frueh
+            # sichtbare Muster war vom Rauschen aufgeblaeht) -- die Tageszeit oben
+            # bleibt der weit groessere Hebel.
+            if weeks < 3:
+                reife = (f'Erst {weeks}&nbsp;Wochen beobachtet &mdash; ein '
+                         f'vorl&auml;ufiges Bild, das sich mit jeder Woche '
+                         f'sch&auml;rft. ')
+            else:
+                reife = (f'Basis: {weeks}&nbsp;Wochen &mdash; ein kleiner, aber '
+                         f'inzwischen stabiler Effekt. Die Tageszeit oben macht '
+                         f'ein Vielfaches aus, der Wochentag ist Feinschliff. ')
             hours_html += (
                 '<div class="sec-head" style="margin-top:24px">'
                 '<div class="sec-label">Wochentag</div>'
                 '<div class="sec-note">Abweichung vom Preistrend</div></div>'
                 + svg_weekday(wd)
-                + f'<p class="chart-note">{aussage}Erst {weeks} Wochen '
-                  f'beobachtet &mdash; ein vorl&auml;ufiges Bild, das sich mit '
-                  f'jeder Woche sch&auml;rft. Der l&auml;ngerfristige Preistrend '
-                  f'ist herausgerechnet, damit hier die Tageswahl steht und nicht '
-                  f'die Preisentwicklung.</p>'
+                + f'<p class="chart-note">{aussage}{reife}Der l&auml;ngerfristige '
+                  f'Preistrend ist herausgerechnet, damit hier die Tageswahl steht '
+                  f'und nicht die Preisentwicklung.</p>'
             )
 
         # --- Ersparnis in Euro (aus der Tageszeit-Spanne) ---
