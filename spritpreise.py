@@ -122,6 +122,12 @@ CONFIG = {
     # Wie viele Stationen das Ranking hoechstens zeigt.
     "station_top_n": 5,
 
+    # --- Umweg-Rechner -----------------------------------------------------
+    # Verbrauch fuers Berechnen der Anfahrt-Spritkosten (l/100 km) und Aufschlag
+    # von Luftlinie auf Strassenkilometer (Tankerkoenig liefert nur Luftlinie).
+    "consumption_l": 7.0,
+    "road_factor": 1.3,
+
     # --- Empfehlung & Ersparnis --------------------------------------------
     # Fuer die Hochrechnung der Jahresersparnis. Bewusst konservativ und immer
     # mit der Annahme daneben geschrieben, damit die Zahl ehrlich bleibt.
@@ -835,6 +841,30 @@ def weekday_profile(lows: list[tuple], cfg: dict) -> list[dict] | None:
     return out if len(out) >= 6 else None
 
 
+def detour_advice(open_rows: list[tuple], cfg: dict) -> dict | None:
+    """Lohnt der Weg zur guenstigsten Tankstelle gegen den Mehrverbrauch der
+    Anfahrt? Vergleicht die preis-guenstigste mit der naechstgelegenen.
+
+    Rechnung: die Preisersparnis auf eine Tankfuellung gegen die Spritkosten des
+    Umwegs (hin und zurueck, Luftlinien-Differenz x road_factor x Verbrauch x
+    Preis). `open_rows` sind (station, state)-Paare wie in build_html. Gibt None,
+    wenn zu wenig Stationen mit Preis+Distanz da sind; {"same": True}, wenn die
+    guenstigste zugleich die naechste ist (nichts abzuwaegen)."""
+    rows = [(s, st["diesel"]) for s, st in open_rows
+            if st.get("diesel") is not None and s.get("dist_km") is not None]
+    if len(rows) < 2:
+        return None
+    cs, cp = min(rows, key=lambda r: r[1])          # guenstigste (Preis)
+    ns, np_ = min(rows, key=lambda r: r[0]["dist_km"])  # naechste (Distanz)
+    if cs["id"] == ns["id"]:
+        return {"same": True, "station": cs}
+    extra_km = max(0.0, cs["dist_km"] - ns["dist_km"]) * 2 * cfg["road_factor"]
+    detour_cost = extra_km * cfg["consumption_l"] / 100.0 * cp
+    gross = (np_ - cp) * cfg["tank_liter"]          # Ersparnis auf die Fuellung
+    return {"same": False, "cheapest": cs, "nearest": ns,
+            "detour_cost": detour_cost, "gross": gross, "net": gross - detour_cost}
+
+
 def adaptive_wunschmarke(lows: list[tuple], cfg: dict) -> float | None:
     """Selbst-nachfuehrende "guenstig"-Marke statt der fixen alarm_schwelle:
     der uebliche Tagesboden (Median der Tagestiefstwerte im Fenster).
@@ -965,6 +995,16 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
 .hero__meta{color:var(--muted);font-size:13.5px;margin-top:3px;}
 .hero__note{color:var(--good-ink);font-size:13.5px;margin-top:10px;
   padding-top:10px;border-top:1px solid var(--line);}
+
+/* Umweg-Rechner */
+.detour{display:flex;gap:10px;align-items:flex-start;background:var(--chip);
+  border:1px solid var(--line);border-left:4px solid var(--c,var(--muted));
+  border-radius:12px;padding:11px 14px;margin:0 0 22px;font-size:13.5px;
+  color:var(--muted);}
+.detour.good{--c:var(--good);} .detour.bad{--c:var(--bad);}
+.detour.neutral{--c:var(--warn);}
+.detour__ic{flex:none;font-size:16px;line-height:1.3;}
+.detour b{color:var(--ink);font-weight:600;}
 
 /* Preisdarstellung */
 .price{font-family:var(--serif);font-weight:600;font-variant-numeric:tabular-nums;
@@ -1543,6 +1583,35 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
         '<div class="alert__d" id="stale-d"></div></div></div>'
     )
 
+    # --- Umweg-Rechner: lohnt der Weg zur guenstigsten? ---
+    detour_html = ""
+    det = detour_advice(open_rows, cfg)
+    if det and det.get("same"):
+        detour_html = (
+            '<div class="detour good"><span class="detour__ic">&#128663;</span>'
+            f'<div>Die g&uuml;nstigste ist zugleich die n&auml;chste '
+            f'({html.escape(station_label(det["station"]))}) &mdash; nichts '
+            f'abzuw&auml;gen.</div></div>')
+    elif det:
+        cs, ns, net = det["cheapest"], det["nearest"], det["net"]
+        base = (f'Die g&uuml;nstigste ({html.escape(station_label(cs))}, '
+                f'{fmt_km(cs["dist_km"])}&nbsp;km) liegt '
+                f'{fmt_km(cs["dist_km"] - ns["dist_km"])}&nbsp;km weiter als die '
+                f'n&auml;chste ({html.escape(station_label(ns))}). Ersparnis auf die '
+                f'F&uuml;llung ~{fmt_eur(det["gross"])}&nbsp;EUR, Sprit f&uuml;r den '
+                f'Umweg ~{fmt_eur(det["detour_cost"])}&nbsp;EUR ')
+        if net > 0.30:
+            cls, tail = "good", (f'&mdash; netto <b>~{fmt_eur(net)}&nbsp;EUR '
+                                 f'gespart</b>, der Weg lohnt sich.')
+        elif net < -0.30:
+            cls, tail = "bad", ('&mdash; der Umweg frisst die Ersparnis, '
+                                '<b>nimm die n&auml;here</b>.')
+        else:
+            cls, tail = "neutral", ('&mdash; in etwa gleichauf, die n&auml;here '
+                                    'spart den Weg.')
+        detour_html = (f'<div class="detour {cls}"><span class="detour__ic">'
+                       f'&#128663;</span><div>{base}{tail}</div></div>')
+
     # --- Stamm-Tankstelle: wer ist am haeufigsten der guenstigste? ---
     reliability_html = ""
     if ana and ana.get("reliability"):
@@ -1766,6 +1835,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
   {stale_box}
   {alert_html}
   {hero_html}
+  {detour_html}
   {verdict_html}
 
   <div class="legend">
