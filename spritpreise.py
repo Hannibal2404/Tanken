@@ -115,6 +115,13 @@ CONFIG = {
     # vorher herausgerechnet, sonst misst man die Wochendrift statt des Tags.
     "weekday_min_weeks": 2,
 
+    # --- Stamm-Tankstelle (Verlaesslichkeits-Ranking) ----------------------
+    # Ab wie vielen ct ueber dem Tiefstpreis eine Station noch als "praktisch
+    # gleichauf" zaehlt. In der Stadt liegen oft viele auf demselben Zehntelcent.
+    "near_ct": 1.0,
+    # Wie viele Stationen das Ranking hoechstens zeigt.
+    "station_top_n": 5,
+
     # --- Empfehlung & Ersparnis --------------------------------------------
     # Fuer die Hochrechnung der Jahresersparnis. Bewusst konservativ und immer
     # mit der Annahme daneben geschrieben, damit die Zahl ehrlich bleibt.
@@ -622,6 +629,52 @@ def build_curve(events: list[tuple], start: datetime, end: datetime,
     return pts
 
 
+def station_reliability(events: list[tuple], start: datetime, end: datetime,
+                        step_min: int, near_ct: float) -> tuple[dict, int]:
+    """Zeitanteil je Station am guenstigsten Preis im Feld.
+
+    Wie build_curve, aber je Zeitschritt wird geschaut, WELCHE Station(en) vorn
+    liegen -- nicht nur der Marktpreis. Zeit-gewichtet (jeder Schritt zaehlt
+    gleich), damit nicht die Stationen dominieren, die oft nachziehen. Gleichstand
+    zaehlt mit: liegen mehrere auf demselben Preis, sind sie alle "vorn" (in der
+    Stadt sitzen oft viele auf demselben Zehntelcent). Rueckgabe:
+    {sid: {"best": Zeitanteil am Tiefstpreis, "near": Anteil hoechstens near_ct
+    darueber}} und die Zahl gewerteter Schritte."""
+    state: dict[str, float | None] = {}
+    step = timedelta(minutes=step_min)
+    near = near_ct / 100.0
+    best_cnt: dict[str, int] = {}
+    near_cnt: dict[str, int] = {}
+    steps = 0
+    i = 0
+    while i < len(events) and events[i][0] <= start:
+        _, sid, status, price = events[i]
+        state[sid] = price if status == "open" else None
+        i += 1
+    t = start
+    while t <= end:
+        while i < len(events) and events[i][0] <= t:
+            _, sid, status, price = events[i]
+            state[sid] = price if status == "open" else None
+            i += 1
+        prices = {sid: v for sid, v in state.items() if v is not None}
+        if prices:
+            m = min(prices.values())
+            steps += 1
+            for sid, v in prices.items():
+                if v <= m + 1e-9:
+                    best_cnt[sid] = best_cnt.get(sid, 0) + 1
+                if v <= m + near + 1e-9:
+                    near_cnt[sid] = near_cnt.get(sid, 0) + 1
+        t += step
+    if steps == 0:
+        return {}, 0
+    rel = {sid: {"best": best_cnt.get(sid, 0) / steps,
+                 "near": near_cnt.get(sid, 0) / steps}
+           for sid in set(best_cnt) | set(near_cnt)}
+    return rel, steps
+
+
 def hourly_profile(pts: list[tuple], tz: ZoneInfo, cfg: dict) -> list[dict]:
     """Mittlere Abweichung des Bestpreises je Tagesstunde, in ct.
 
@@ -782,6 +835,20 @@ def weekday_profile(lows: list[tuple], cfg: dict) -> list[dict] | None:
     return out if len(out) >= 6 else None
 
 
+def adaptive_wunschmarke(lows: list[tuple], cfg: dict) -> float | None:
+    """Selbst-nachfuehrende "guenstig"-Marke statt der fixen alarm_schwelle:
+    der uebliche Tagesboden (Median der Tagestiefstwerte im Fenster).
+
+    Die fixe Schwelle veraltet mit dem Preisniveau -- 2026 stieg der Boden ueber
+    den Sommer um >20 ct, die alte 2,25-Marke loeste danach nie mehr aus. Der
+    Median der Tagestiefstwerte wandert dagegen mit. Faellt auf alarm_schwelle
+    zurueck, solange zu wenig Historie da ist."""
+    vals = [v for _, v in lows]
+    if len(vals) < cfg["trend_min_days"]:
+        return cfg["alarm_schwelle"]
+    return _median(vals)
+
+
 def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
     """Alles, was die Auswertung anzeigt. Reine Dateiarbeit -- laeuft auch,
     wenn der Abruf gescheitert ist, dann eben ohne den letzten Punkt.
@@ -821,6 +888,8 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
     span_h = (end - c_start).total_seconds() / 3600
     hours = hourly_profile(profile_pts, tz, cfg)
     lows = daily_lows(end, cfg, tz)
+    reliability, _ = station_reliability(events, p_start, end,
+                                         cfg["curve_step_min"], cfg["near_ct"])
     return {
         "pts": pts,
         "start": c_start,
@@ -835,6 +904,9 @@ def analyse_history(state: dict, cfg: dict, now: datetime) -> dict | None:
         "savings": savings_stat(hours, cfg),
         "lows": lows,
         "weekday": weekday_profile(lows, cfg),
+        "reliability": reliability,
+        "reli_days": max(1, round((end - p_start).total_seconds() / 86400)),
+        "wunschmarke": adaptive_wunschmarke(lows, cfg),
         "current": current,
     }
 
@@ -985,6 +1057,18 @@ body{background:var(--paper);color:var(--ink);font-family:var(--sans);
   stroke-linejoin:round;stroke-linecap:round;}
 .chart .spark-dot{fill:var(--ink);}
 .chart-note{color:var(--faint);font-size:12.5px;margin:0 0 26px;line-height:1.55;}
+
+/* Stamm-Tankstelle (Verlaesslichkeits-Ranking) */
+.rel{list-style:none;display:flex;flex-direction:column;gap:8px;margin:0 0 10px;}
+.rel__row{display:flex;align-items:center;gap:12px;background:var(--card);
+  border:1px solid var(--line);border-radius:12px;padding:11px 14px;}
+.rel__rank{font-family:var(--serif);font-weight:600;color:var(--faint);
+  font-size:15px;width:1.1em;flex:none;text-align:center;}
+.rel__l{min-width:0;flex:1;}
+.rel__name{font-weight:600;font-size:15.5px;overflow-wrap:anywhere;}
+.rel__meta{color:var(--muted);font-size:12.5px;margin-top:1px;display:block;}
+.rel__share{font-family:var(--serif);font-weight:600;color:var(--warn-ink);
+  font-variant-numeric:tabular-nums;white-space:nowrap;flex:none;}
 
 /* Fusszeile */
 .foot{border-top:1px solid var(--line);padding-top:16px;margin-top:8px;
@@ -1459,21 +1543,53 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
         '<div class="alert__d" id="stale-d"></div></div></div>'
     )
 
+    # --- Stamm-Tankstelle: wer ist am haeufigsten der guenstigste? ---
+    reliability_html = ""
+    if ana and ana.get("reliability"):
+        ranked = sorted(
+            ((sid, r) for sid, r in ana["reliability"].items() if by_id.get(sid)),
+            key=lambda x: (x[1]["best"], x[1]["near"]), reverse=True)
+        ranked = [x for x in ranked if x[1]["best"] > 0][:cfg["station_top_n"]]
+        if ranked:
+            rel_rows = []
+            for n, (sid, r) in enumerate(ranked, 1):
+                s = by_id[sid]
+                rel_rows.append(
+                    f'<li class="rel__row"><span class="rel__rank">{n}</span>'
+                    f'<span class="rel__l"><span class="rel__name">'
+                    f'{html.escape(station_label(s))}</span>'
+                    f'<span class="rel__meta">{html.escape(address_line(s))} '
+                    f'&middot; {fmt_km(s.get("dist_km"))}&nbsp;km</span></span>'
+                    f'<span class="rel__share">{r["best"] * 100:.0f}&nbsp;%</span>'
+                    f'</li>')
+            reliability_html = (
+                '<div class="sec-head"><div class="sec-label">Stamm-Tankstelle</div>'
+                f'<div class="sec-note">letzte {ana["reli_days"]} Tage</div></div>'
+                f'<ol class="rel">{"".join(rel_rows)}</ol>'
+                '<p class="chart-note">Anteil der Zeit, in dem die Station der '
+                'g&uuml;nstigste im Feld war (Gleichstand mitgez&auml;hlt). Wer '
+                'ohne Preisvergleich einfach dort tankt, liegt am h&auml;ufigsten '
+                'richtig &mdash; die Tageszeit z&auml;hlt aber weiter mehr als die '
+                'Wahl der Tankstelle.</p>'
+            )
+
     # --- Auswertung: Einordnung, Verlauf, Tagesstunden ---
     verdict_html = curve_html = hours_html = ""
     if ana:
         v = ana["verdict"]
         if v:
-            # Den absoluten Schwellen-Hinweis nur zeigen, wenn die Einordnung
-            # ohnehin "guenstig" sagt -- sonst stuende "eher teuer" direkt neben
-            # "unter deiner Schwelle" (die 2,25 sind bewusst locker gesetzt und
-            # werden fast taeglich unterschritten). Die relative Einordnung ist
-            # das staerkere Signal; die Schwelle bestaetigt sie nur.
+            # Zusatz-Hinweis nur, wenn die Einordnung ohnehin "guenstig" sagt --
+            # sonst stuende "eher teuer" direkt neben "unter dem Tagestief". Die
+            # Bezugsmarke ist der uebliche Tagesboden (Median der Tagestiefstwerte,
+            # wandert mit dem Preisniveau) statt der fixen alarm_schwelle, die mit
+            # dem Sommeranstieg 2026 veraltet ist. Die relative Einordnung bleibt
+            # das staerkere Signal; die Marke bestaetigt sie nur.
             unter = ""
+            marke = ana.get("wunschmarke")
             if (v["cls"] == "good" and best_price is not None
-                    and best_price <= cfg["alarm_schwelle"]):
-                unter = (f' Und unter deiner Wunschmarke von '
-                         f'{fmt_eur_l(cfg["alarm_schwelle"])}&nbsp;EUR.')
+                    and marke is not None and best_price <= marke + 1e-9):
+                unter = (f' Und unter dem &uuml;blichen Tagestief von '
+                         f'{fmt_eur_l(marke)}&nbsp;EUR.')
             # Zeitbewusste Empfehlung aus dem Stundenprofil -- nur wenn vorhanden.
             hint = ana.get("timing")
             hint_html = ""
@@ -1669,6 +1785,7 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
     {"".join(cards)}
   </div>
 
+  {reliability_html}
   {curve_html}
   {hours_html}
 
