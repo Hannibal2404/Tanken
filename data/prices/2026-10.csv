@@ -1,0 +1,4 @@
+timestamp_utc,station_id,status,diesel
+2026-10-01T03:01:02Z,4c8cac28-e631-42aa-8206-db8f9acf8919,open,2.058
+2026-10-01T03:01:02Z,51d4b52a-a095-1aa0-e100-80009459e03a,open,2.119
+2026-10-01T03:01:02Z,005056ba-7cb6-1ed2-bceb-8b9067120d33,open,1.999
