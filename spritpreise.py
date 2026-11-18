@@ -1877,6 +1877,36 @@ def build_html(stations: list[dict], state: dict, cfg: dict, now: datetime,
 # ---------------------------------------------------------------------------
 # HAUPTPROGRAMM
 # ---------------------------------------------------------------------------
+def build_dashboard_json(stations: list[dict], state: dict, now: datetime,
+                         error: str | None, ana: dict | None) -> str:
+    """Kompakte Daten fuer das Kuechen-Dashboard (Repo Hannibal2404/Dashboard)."""
+    by_id = {s["id"]: s for s in stations}
+    best = None
+    for sid, st in (state.get("stations") or {}).items():
+        d = st.get("diesel")
+        if d is None or st.get("status") != "open":
+            continue
+        if best is None or d < best[0]:
+            best = (d, by_id.get(sid) or {})
+    out = {
+        "built": iso_utc(now),
+        "checked": (state or {}).get("checked_utc"),
+        "error": bool(error),
+        "price": best[0] if best else None,
+        "station": station_label(best[1]) if best else None,
+        "street": address_line(best[1]) if best else None,
+        "dist_km": best[1].get("dist_km") if best else None,
+        "verdict": None, "timing": None, "lows": [],
+    }
+    if ana:
+        v = ana.get("verdict")
+        if v:
+            out["verdict"] = {"cls": v["cls"], "head": html.unescape(v["head"])}
+        out["timing"] = ana.get("timing")
+        out["lows"] = [[d.isoformat(), p] for d, p in (ana.get("lows") or [])][-14:]
+    return json.dumps(out, ensure_ascii=False)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Spritpreis-Tracker Diesel")
     ap.add_argument("--out", default="./public", help="Ausgabeverzeichnis")
@@ -1933,6 +1963,13 @@ def main() -> int:
                           error, ana)
     (out_dir / "index.html").write_text(html_out, encoding="utf-8")
     print(f"Dashboard geschrieben: {out_dir / 'index.html'}")
+    try:
+        (out_dir / "dashboard.json").write_text(
+            build_dashboard_json(stations, state, now, error, ana),
+            encoding="utf-8")
+    except Exception as e:                      # nie die Seite riskieren
+        print(f"Warnung: dashboard.json uebersprungen ({type(e).__name__}: {e}).",
+              file=sys.stderr)
 
     # Bewusst Exit 0 auch bei Abrufproblemen: die Seite bleibt online und zeigt
     # den letzten Stand samt Hinweis. Der Fehler steht im Actions-Log.
